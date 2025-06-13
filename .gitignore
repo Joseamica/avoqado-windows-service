@@ -1,0 +1,19 @@
+# Dependencias
+/node_modules
+
+# Archivos de build
+/dist
+
+# Logs
+/logs
+*.log
+
+# Archivos de entorno
+.env
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivo del empaquetador
+/AvoqadoSyncService.exe
