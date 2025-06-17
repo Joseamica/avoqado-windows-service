@@ -1,6 +1,7 @@
 # Dependencias
 /node_modules
-
+# Archivo de estado de sincronización
+syncState.json
 # Archivos de build
 /dist
 

@@ -33,11 +33,15 @@ const handleCommand = async (msg: ConsumeMessage | null) => {
           log.info(`[Comandante] Acción 'createEmptyOrder' completada.`);
           break;
 
-        case 'Order.ADD_ITEM':
-          const orderFolio = payload.orderFolio; // El folio ahora debe venir en el payload
-          await adapter.addItemToOrder(orderFolio, payload as OrderAddItemData);
-          log.info(`[Comandante] Acción 'addItemToOrder' completada para el folio ${orderFolio}.`);
-          break;
+        case 'OrderItem.CREATE':
+            // El payload ya contiene todo lo que necesitamos
+            const { orderFolio, ...itemData } = payload;
+            if (!orderFolio) {
+              throw new Error("El payload para 'OrderItem.CREATE' debe incluir 'orderFolio'.");
+            }
+            await adapter.addItemToOrder(orderFolio, itemData as OrderAddItemData);
+            log.info(`[Comandante] Acción 'addItemToOrder' completada para el folio ${orderFolio}.`);
+            break;
         
         default:
           log.warn(`[Comandante] No hay un manejador para el comando: ${entity}.${action}`);

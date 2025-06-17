@@ -2,7 +2,8 @@ import winston from 'winston';
 import 'winston-daily-rotate-file';
 import path from 'path';
 
-const logDir = path.join(process.env.ProgramData || 'C:/ProgramData', 'AvoqadoSync', 'logs');
+// const logDir = path.join(process.env.ProgramData || 'C:/ProgramData', 'AvoqadoSync', 'logs');
+const logDir = path.join(__dirname, '../../logs');
 
 export const initializeLogger = () => {
   winston.configure({

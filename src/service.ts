@@ -2,7 +2,7 @@ import { loadConfig } from './config';
 import { initializeLogger, log } from './core/logger';
 import { connectToRabbitMQ, closeRabbitMQConnection } from './core/rabbitmq';
 import { connectToSql, closeDbPool } from './core/db';
-import { startProducer } from './components/producer';
+import { startProducer, getProducerStats } from './components/producer';
 import { startCommander } from './components/commander';
 
 async function startApp() {
@@ -15,6 +15,11 @@ async function startApp() {
     await connectToRabbitMQ();
 
     startProducer();
+    setInterval(async () => {
+      const stats = await getProducerStats();
+      console.log('Smart Snapshot Stats:', stats);
+    }, 5 * 60 * 1000);
+
     startCommander();
 
     log.info('✅ Servicio de Sincronización Avoqado corriendo exitosamente.');

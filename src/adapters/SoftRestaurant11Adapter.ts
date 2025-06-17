@@ -1,9 +1,8 @@
-import { IPOSAdapter, OrderCreateData, OrderAddItemData, PaymentData, ShiftOpenData, ShiftCloseData } from './IPosAdapter';
+import sql from 'mssql';
 import { getDbPool } from '../core/db';
 import { log } from '../core/logger';
-import sql, { NVarChar } from 'mssql';
-import { v4 as uuidv4 } from 'uuid';
 import { createEmptyOrder } from '../services/Orders/createEmptyOrder';
+import { IPOSAdapter, OrderAddItemData, OrderCreateData, PaymentData, ShiftCloseData, ShiftOpenData } from './IPosAdapter';
 
 export class SoftRestaurant11Adapter implements IPOSAdapter {
 
@@ -23,9 +22,22 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    */
   async addItemToOrder(folio: number, item: OrderAddItemData): Promise<void> {
     log.info(`[Adapter SR11] Añadiendo producto '${item.productId}' al folio ${folio}...`);
+    console.log(`[Adapter SR11] Añadiendo producto '${item.productId}' al folio ${folio}...`);
     const pool = getDbPool();
-    const transaction = new sql.Transaction(pool);
+    const transaction = new sql.Transaction(pool)
     try {
+      // --- PASO 1: LOOKUP DEL PRODUCTO (se mantiene igual) ---
+      const productLookupResult = await pool.request()
+        .input('productIdLookup', sql.VarChar, item.productId)
+        .query("SELECT idproducto FROM productos WHERE descripcion = @productIdLookup");
+      
+      if (productLookupResult.recordset.length === 0) {
+        throw new Error(`Producto con identificador '${item.productId}' no encontrado en el POS.`);
+      }
+      const actualPosProductId = productLookupResult.recordset[0].idproducto;
+      log.info(`Producto encontrado. ID del POS: '${actualPosProductId}'`);
+      
+      // --- PASO 2: TRANSACCIÓN PARA INSERTAR Y ACTUALIZAR ---
       await transaction.begin();
 
       const movResult = await new sql.Request(transaction)
@@ -33,7 +45,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .query("SELECT ISNULL(MAX(movimiento), 0) as maxMovimiento FROM tempcheqdet WHERE foliodet = @folio");
       const nextMovement = movResult.recordset[0].maxMovimiento + 1;
       
-      const priceWithoutTax = item.price / 1.16; // Asumimos 16% IVA para el ejemplo
+      const priceWithoutTax = item.price / 1.16;
       
       const insertQuery = `
         INSERT INTO tempcheqdet (foliodet, movimiento, idproducto, cantidad, precio, preciosinimpuestos, hora, idestacion, impuesto1, idmeseroproducto, comentario) 
@@ -42,7 +54,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       await new sql.Request(transaction)
         .input('folio', sql.Int, folio)
         .input('movimiento', sql.Int, nextMovement)
-        .input('idproducto', sql.VarChar, item.productId)
+        .input('idproducto', sql.VarChar, actualPosProductId)
         .input('cantidad', sql.Int, item.quantity)
         .input('precio', sql.Money, item.price * item.quantity)
         .input('preciosinimpuestos', sql.Money, priceWithoutTax * item.quantity)
@@ -50,11 +62,52 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('comentario', sql.VarChar, item.notes || '')
         .query(insertQuery);
       
+      log.info(`[Adapter SR11] Producto '${actualPosProductId}' insertado en tempcheqdet.`);
+
+      // ✅ PASO 3: RECALCULAR Y ACTUALIZAR TOTALES EN tempcheques
+      const updateTotalsQuery = `
+        UPDATE tc
+        SET 
+          tc.totalarticulos = ISNULL(det.total_cantidad, 0),
+          tc.subtotal = ISNULL(det.total_precio_sin_imp, 0),
+          tc.totalimpuesto1 = ISNULL(det.total_impuestos, 0),
+          tc.total = ISNULL(det.total_final, 0),
+          tc.totalsindescuento = ISNULL(det.total_precio_sin_imp, 0) -- Asumiendo que el descuento se aplica después
+        FROM 
+          tempcheques tc
+        LEFT JOIN 
+          (SELECT
+              foliodet,
+              SUM(cantidad) as total_cantidad,
+              SUM(preciosinimpuestos) as total_precio_sin_imp,
+              SUM(precio - preciosinimpuestos) as total_impuestos,
+              SUM(precio) as total_final
+           FROM 
+              tempcheqdet
+           WHERE 
+              foliodet = @folio
+           GROUP BY 
+              foliodet
+          ) as det ON tc.folio = det.foliodet
+        WHERE 
+          tc.folio = @folio;
+      `;
+      await new sql.Request(transaction)
+        .input('folio', sql.Int, folio)
+        .query(updateTotalsQuery);
+      
+      log.info(`[Adapter SR11] Totales para el folio ${folio} recalculados y actualizados.`);
+
       await transaction.commit();
-      log.info(`[Adapter SR11] Producto '${item.productId}' añadido. Confiando en el Trigger de la BD para actualizar los totales.`);
+      log.info(`[Adapter SR11] COMMIT exitoso. Producto añadido y totales actualizados.`);
+        
     } catch (err: any) {
       log.error(`[Adapter SR11] Error en transacción de añadir producto, haciendo ROLLBACK...`, err.message);
-      await transaction.rollback();
+      try {
+        await transaction.rollback();
+      } catch (rollbackErr: any) {
+        log.error('[Adapter SR11] Falla crítica al intentar hacer ROLLBACK.', rollbackErr.message);
+      }
       throw err;
     }
   }

@@ -7,12 +7,31 @@ import { log } from '../../core/logger';
 
 export async function createEmptyOrder(data: OrderCreateData): Promise<{ folio: number }> {
   log.info(`[Adapter SR11] Iniciando transacción para crear orden en mesa ${data.tableNumber}...`);
+
   log.info(`[Adapter SR11] Datos de la orden: ${JSON.stringify(data)}`);
   const pool = getDbPool();
   const transaction = new sql.Transaction(pool);
   const newWorkspaceId = uuidv4().toUpperCase();
 
   try {
+    log.info(`[Adapter SR11] Verificando si la mesa ${data.tableNumber} está ocupada...`);
+    const checkTableQuery = `
+      SELECT folio FROM tempcheques 
+      WHERE pagado = 0 AND cancelado = 0 AND mesa = @mesa
+    `;
+    
+    const tableCheckResult = await pool.request()
+      .input('mesa', sql.VarChar, data.tableNumber)
+      .query(checkTableQuery);
+
+    if (tableCheckResult.recordset.length > 0) {
+      // Si la consulta devuelve algo, la mesa está ocupada. Lanzamos un error.
+      const existingFolio = tableCheckResult.recordset[0].folio;
+      throw new Error(`La mesa ${data.tableNumber} ya está ocupada por el folio ${existingFolio}.`);
+    }
+    log.info(`[Adapter SR11] Mesa ${data.tableNumber} está libre. Procediendo...`);
+
+
     await transaction.begin();
 
     const folioResult = await new sql.Request(transaction)

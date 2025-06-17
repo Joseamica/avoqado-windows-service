@@ -21,6 +21,7 @@ export interface OrderCreateData {
   tableNumber: string;
   waiterPosId: string;
   customerCount: number;
+  posAreaId: string;
 }
 
 export interface OrderAddItemData {

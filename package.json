@@ -4,7 +4,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
-    "dev": "nodemon",
+    "dev": "nodemon ts-node ./src/service.ts",
     "start": "node dist/service.js",
     "package": "npm run build && pkg . --targets node18-win-x64 --output AvoqadoSyncService.exe",
     "svc:install": "npm run build && node dist/main.js install",
@@ -18,7 +18,8 @@
     "nodemon": "^3.1.10",
     "uuid": "^11.1.0",
     "winston": "^3.11.0",
-    "winston-daily-rotate-file": "^4.7.1"
+    "winston-daily-rotate-file": "^4.7.1",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "@types/amqplib": "^0.10.1",
@@ -26,6 +27,7 @@
     "@types/node": "^20.8.9",
     "@types/node-windows": "^0.1.6",
     "@types/uuid": "^10.0.0",
+    "@types/xml2js": "^0.4.14",
     "cross-env": "^7.0.3",
     "pkg": "^5.8.1",
     "ts-node": "^10.9.1",
