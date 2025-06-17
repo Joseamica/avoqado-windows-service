@@ -530,6 +530,68 @@ BEGIN
     PRINT N'  ✅ Creado trigger: Trg_Avoqado_OrderItems';
 END
 
+-- Trigger para turnos (con lógica de eliminar y recrear)
+
+-- 1. Primero, se elimina el trigger si ya existe para asegurar la actualización.
+IF EXISTS (SELECT * FROM sys.triggers WHERE name = 'Trg_Avoqado_Shifts')
+BEGIN
+    DROP TRIGGER Trg_Avoqado_Shifts;
+    PRINT N'  ⚠️ Trigger existente Trg_Avoqado_Shifts eliminado para recrearlo.';
+END
+
+-- 2. Después, se crea la versión más reciente del trigger.
+EXEC('
+CREATE TRIGGER Trg_Avoqado_Shifts
+ON dbo.turnos
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @entityId VARCHAR(100);
+    DECLARE @changeReason VARCHAR(100);
+
+    -- Manejar INSERT y UPDATE
+    IF EXISTS (SELECT 1 FROM inserted)
+    BEGIN
+        SET @changeReason = CASE
+            WHEN EXISTS (SELECT 1 FROM deleted) THEN ''shift_updated''
+            ELSE ''shift_created''
+        END;
+
+        DECLARE shift_cursor CURSOR FOR
+            SELECT DISTINCT CAST(idturno AS VARCHAR(100)) FROM inserted;
+
+        OPEN shift_cursor;
+        FETCH NEXT FROM shift_cursor INTO @entityId;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            EXEC sp_TrackEntityChange ''shift'', @entityId, @changeReason;
+            FETCH NEXT FROM shift_cursor INTO @entityId;
+        END;
+        CLOSE shift_cursor;
+        DEALLOCATE shift_cursor;
+    END
+    -- Manejar DELETE
+    ELSE IF EXISTS (SELECT 1 FROM deleted)
+    BEGIN
+        DECLARE delete_cursor CURSOR FOR
+            SELECT DISTINCT CAST(idturno AS VARCHAR(100)) FROM deleted;
+
+        OPEN delete_cursor;
+        FETCH NEXT FROM delete_cursor INTO @entityId;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            EXEC sp_TrackEntityChange ''shift'', @entityId, ''shift_deleted'';
+            FETCH NEXT FROM delete_cursor INTO @entityId;
+        END;
+        CLOSE delete_cursor;
+        DEALLOCATE delete_cursor;
+    END
+END
+');
+PRINT N'  ✅ Creado trigger: Trg_Avoqado_Shifts';
+
 -- =====================================================
 -- PASO 7: VERIFICACIÓN FINAL
 -- =====================================================

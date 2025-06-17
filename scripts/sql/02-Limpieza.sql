@@ -30,12 +30,12 @@ DECLARE @AvoqadoTriggers TABLE (TriggerName NVARCHAR(128));
 INSERT INTO @AvoqadoTriggers VALUES
     ('Trg_Avoqado_Orders'),
     ('Trg_Avoqado_OrderItems'),
-    ('Trg_Avoqado_UpdateTimestamp'),
-    ('Trg_Avoqado_ItemsUpdateParent'),
     ('trg_AvoqadoOrderTracking'),
-    ('Trg_Avoqado_Shifts'),
+    ('Trg_Avoqado_Shifts'), -- <<-- ASEGÚRATE QUE ESTA LÍNEA EXISTA
     ('Trg_Avoqado_Areas'),
-    ('Trg_Avoqado_Staff');
+    ('Trg_Avoqado_Staff'),
+    ('Trg_Avoqado_UpdateTimestamp'),
+    ('Trg_Avoqado_ItemsUpdateParent');
 
 DECLARE trigger_cursor CURSOR FOR
     SELECT t.name
