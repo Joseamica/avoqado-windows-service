@@ -8,7 +8,9 @@
     "start": "node dist/service.js",
     "package": "npm run build && pkg . --targets node18-win-x64 --output AvoqadoSyncService.exe",
     "svc:install": "npm run build && node dist/main.js install",
-    "svc:uninstall": "node dist/main.js uninstall"
+    "svc:uninstall": "node dist/main.js uninstall",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "check-format": "prettier --check \"src/**/*.ts\""
   },
   "dependencies": {
     "amqplib": "^0.10.3",
@@ -29,7 +31,10 @@
     "@types/uuid": "^10.0.0",
     "@types/xml2js": "^0.4.14",
     "cross-env": "^7.0.3",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-prettier": "^5.5.0",
     "pkg": "^5.8.1",
+    "prettier": "^3.5.3",
     "ts-node": "^10.9.1",
     "typescript": "^5.2.2"
   },
