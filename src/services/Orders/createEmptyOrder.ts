@@ -1,4 +1,4 @@
-// adapters/softrestaurant11/operations/createEmptyOrder.ts
+// services/Orders/createEmptyOrder.ts
 import sql from 'mssql';
 import { v4 as uuidv4 } from 'uuid';
 import { OrderCreateData } from '../../adapters/IPosAdapter';
