@@ -24,7 +24,6 @@ interface ChangeNotification {
   ChangeReason: string
 }
 
-// ... (sendHeartbeat function sin cambios) ...
 async function sendHeartbeat() {
   try {
     const pool = getDbPool()
@@ -105,6 +104,22 @@ async function pollForChanges() {
 
     log.info(`[Producer] 🎯 ${changes.length} nuevos cambios detectados.`)
     const { venueId, posType } = loadConfig()
+    // ✅ PASO 1: Detectar los IDs de los turnos cerrados en este lote específico.
+    const closedShiftIdsInBatch = new Set<string>()
+    for (const change of changes) {
+      if (change.EntityType === 'shift' && change.ChangeReason.includes('updated')) {
+        const shiftRes = await pool
+          .request()
+          .input('idturno', sql.BigInt, change.EntityId)
+          .query('SELECT cierre FROM turnos WHERE idturno = @idturno')
+        if (shiftRes.recordset[0] && shiftRes.recordset[0].cierre) {
+          // Si el turno tiene una fecha de cierre, lo consideramos cerrado en este lote.
+          log.info(`[Producer-Context] Detectado cierre de turno en este lote: ${change.EntityId}`)
+          closedShiftIdsInBatch.add(change.EntityId)
+        }
+      }
+    }
+    // ✅ PASO 2: Procesar cada cambio con el contexto que acabamos de obtener.
 
     for (const change of changes) {
       try {
@@ -123,6 +138,18 @@ async function pollForChanges() {
                 log.info(`[Producer] 🚫 Cancelando actualización debounced para ${change.EntityId} debido a un evento inmediato.`)
                 clearTimeout(debouncedOrders.get(change.EntityId)!)
                 debouncedOrders.delete(change.EntityId)
+              }
+              // ✅ LÓGICA DE DECISIÓN INTELIGENTE PARA EVITAR ELIMINACION DE ORDENES EN TURNOS CERRADOS
+              if (eventType === 'deleted') {
+                const orderIdParts = change.EntityId.split(':') // Formato: INSTANCE:TURNO:FOLIO
+                const shiftIdForOrder = orderIdParts[1]
+
+                if (closedShiftIdsInBatch.has(shiftIdForOrder)) {
+                  log.info(
+                    `[Producer-Context] Ignorando eliminación de la orden ${change.EntityId} porque pertenece al turno cerrado ${shiftIdForOrder}.`,
+                  )
+                  continue // Saltamos al siguiente cambio en el bucle.
+                }
               }
               result = await processOrderChange(change, venueId)
               if (result) {
@@ -146,7 +173,9 @@ async function pollForChanges() {
           case 'shift':
             result = await processShiftChange(change, venueId)
             if (result) {
-              const routingKey = `pos.${posType}.shift.${eventType}`
+              const finalEventType = eventType === 'updated' ? 'closed' : eventType
+
+              const routingKey = `pos.${posType}.shift.${finalEventType}`
               await publishMessage(POS_EVENTS_EXCHANGE, routingKey, result.payload)
               log.info(`[Producer] ✅ Evento enviado: ${routingKey} para ${change.EntityId}`)
             }
@@ -210,6 +239,29 @@ async function processOrderChange(change: ChangeNotification, venueId: string): 
         log.warn(`No se pudo obtener area ${posData.idarearestaurant}`)
       }
     }
+    let paymentsData: any[] = []
+    if (posData.pagado) {
+      // Si la bandera `pagado` es true...
+      log.info(`[Order Processor] Orden ${folio} marcada como pagada. Buscando detalles del pago...`)
+      const paymentsRes = await pool
+        .request()
+        .input('folio', sql.Int, folio)
+        .query('SELECT idformadepago, importe, propina, referencia FROM tempchequespagos WHERE folio = @folio')
+
+      if (paymentsRes.recordset.length > 0) {
+        paymentsData = paymentsRes.recordset.map(p => ({
+          methodExternalId: p.idformadepago.trim(), // 'CRE'
+          amount: parseFloat(p.importe || 0),
+          tipAmount: parseFloat(p.propina || 0),
+          reference: p.referencia?.trim() || null,
+          posRawData: p,
+        }))
+        log.info(`[Order Processor] Se encontraron ${paymentsData.length} pagos para la orden ${folio}.`)
+      }
+    }
+    log.info(`[Order Processor] Obteniendo catálogo de formas de pago...`)
+    const paymentMethodsRes = await pool.request().query('SELECT idformadepago, descripcion, tipo FROM formasdepago')
+    const paymentMethodsCatalog = paymentMethodsRes.recordset
     const payload = {
       venueId,
       orderData: {
@@ -234,6 +286,8 @@ async function processOrderChange(change: ChangeNotification, venueId: string): 
       tableData: { externalId: posData.mesa?.toString() || `Mesa ${folio}`, posAreaId: posData.idarearestaurant },
       areaData: { externalId: posData.idarearestaurant, name: posArea?.descripcion || `Área ${posData.idarearestaurant}` },
       shiftData: { externalId: posData.idturno.toString() },
+      payments: paymentsData, // Se añade el array de pagos, estará vacío si la orden no está pagada.
+      paymentMethodsCatalog: paymentMethodsCatalog,
     }
     return { payload }
   } catch (error) {
