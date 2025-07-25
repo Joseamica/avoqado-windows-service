@@ -1,4 +1,16 @@
-# Análisis Técnico del Flujo Operativo de SoftRestaurant POS
+# Arquitectura Técnica del Sistema POS SoftRestaurant v11
+
+## Información Crítica del Sistema
+
+### Versión SQL Server
+**CRÍTICO:** Este sistema POS ejecuta **Microsoft SQL Server 2014 Express Edition (32-bit)** - Versión 12.0.4100.1 Intel X86. Todas las operaciones de base de datos, triggers y procedimientos almacenados deben ser compatibles con la sintaxis y características de SQL Server 2014.
+
+### Esquema de Base de Datos Completo
+La base de datos SoftRestaurant v11 contiene **366 tablas** con una arquitectura multi-tenant sofisticada:
+- **366 tablas totales** incluyendo lógica de negocio central, configuración, y tablas de integración
+- **189 relaciones de foreign key** asegurando integridad referencial
+- **Soporte multi-tenant** a través de columnas `WorkspaceId` (uniqueidentifier)
+- **Tablas de integración Avoqado** ya instaladas para sincronización en tiempo real
 
 ## Filosofía Central: El Ciclo de Vida Transaccional
 
@@ -6,9 +18,18 @@ El POS opera bajo un principio fundamental: un ciclo de vida transaccional basad
 
 ### Tablas Clave en este Ciclo
 
-- **`tempcheques`**: Contiene las órdenes activas del turno actual. Es una tabla de alta transaccionalidad, constantemente leída y actualizada.
-- **`cheques`**: Es el archivo histórico. Contiene una copia exacta de las órdenes una vez que han sido cerradas (pagadas o canceladas) y el turno finaliza.
-- **`turnos`**: Gestiona el contexto temporal de las operaciones. Una orden siempre pertenece a un turno.
+- **`tempcheques`**: Contiene las órdenes activas del turno actual. Tabla de alta transaccionalidad con **194 columnas** incluyendo totales, pagos, información del cliente, e integración Avoqado
+- **`cheques`**: Es el archivo histórico. Contiene una copia exacta de las órdenes una vez cerradas (pagadas o canceladas) y el turno finaliza
+- **`turnos`**: Gestiona el contexto temporal de las operaciones. Una orden siempre pertenece a un turno
+- **`tempcheqdet`**: Items de orden (productos, cantidades, precios, modificaciones)
+- **`tempchequespagos`**: Registros de pago para órdenes activas
+
+### Campos Críticos en Tabla tempcheques (194 columnas totales):
+- **Clave Primaria**: `folio` (bigint) - Identificador único de orden
+- **Campos de Estado**: `pagado` (bit), `cancelado` (bit), `impreso` (bit) - Compuertas del ciclo de vida
+- **Campos de Negocio**: `total` (money), `subtotal` (money), `idturno` (bigint), `mesa` (varchar)
+- **Multi-tenant**: `WorkspaceId` (uniqueidentifier) - Para soporte multi-ubicación
+- **Integración Avoqado**: `AvoqadoLastModifiedAt` (datetime2) - Timestamp de seguimiento de cambios
 
 ## Las 4 Fases del Ciclo de Vida de una Orden
 
@@ -93,10 +114,12 @@ En resumen, el sistema POS es un motor transaccional robusto y predecible. Nuest
 - **`chequespagos`**: Pagos históricos
 
 ### Tabla de Control
-- **`turnos`**: Gestión de turnos
-  - `idturno`: ID del turno
+- **`turnos`**: Gestión de turnos con **Arquitectura Dual-Key**
+  - `idturnointerno`: Primary Key técnico (bigint, auto-increment) - Valores: 80885, 80884, etc.
+  - `idturno`: Business Key operativo (bigint) - Valores: 894, 893, etc. **[ESTE ES EL QUE USAN LAS APLICACIONES]**
   - `apertura`: Fecha/hora de apertura
   - `cierre`: Fecha/hora de cierre (NULL si activo)
+  - **CRÍTICO**: Todas las operaciones POS usan `idturno`, no `idturnointerno`
 
 ## Estados Críticos para Monitoreo
 
@@ -106,3 +129,130 @@ En resumen, el sistema POS es un motor transaccional robusto y predecible. Nuest
 4. **Orden Pagada**: INSERT en `tempchequespagos` + UPDATE `pagado=1` en `tempcheques`
 5. **Orden Cancelada**: UPDATE `cancelado=1` en `tempcheques`
 6. **Turno Cerrado**: UPDATE `cierre` en `turnos` + purga de temp*
+
+## Arquitectura de Base de Datos Detallada
+
+### Características Específicas de SQL Server 2014
+- **Nivel de Compatibilidad**: SQL Server 2014 (versión 12.0.4100.1)
+- **Tipos de Datos**: Usa `money` para monedas, `datetime2` para timestamps, `uniqueidentifier` para GUIDs
+- **Indexado**: Incluye índices clustered y non-clustered para performance
+- **Restricciones**: Uso extensivo de foreign keys (189 relaciones) y check constraints
+
+### Estructura Completa de Tablas (366 Tablas)
+
+#### Tablas de Negocio Principales:
+- **`tempcheques`** (194 columnas) - Órdenes activas con lógica de negocio comprehensiva
+- **`tempcheqdet`** - Items de orden con detalles de productos
+- **`tempchequespagos`** - Registros de pago para órdenes activas
+- **`productos`** - Catálogo de productos con precios y clasificaciones
+- **`clientes`** - Datos maestros de clientes con información de contacto
+- **`turnos`** - Gestión de turnos con controles de apertura/cierre
+  - **Arquitectura Dual-Key**: `idturnointerno` (PK técnico) + `idturno` (business key)
+  - **Uso operativo**: Las aplicaciones POS usan exclusivamente `idturno`
+- **`areasrestaurant`** - Áreas de restaurante y gestión de mesas
+- **`formasdepago`** - Configuración de métodos de pago
+
+#### Tablas Históricas:
+- **`cheques`** - Órdenes archivadas (espeja estructura de tempcheques)
+- **`cheqdet`** - Items de orden archivados
+- **`chequespagos`** - Registros de pago archivados
+
+#### Configuración y Control:
+- **`empresas`** - Configuración de empresa/sucursal
+- **`estaciones`** - Configuración de terminales/estaciones POS
+- **`usuarios`** - Cuentas de usuario y permisos
+- **`workspace_*`** tablas - Gestión de workspaces multi-tenant
+
+### Tablas de Integración Avoqado
+- **`AvoqadoInstanceInfo`** - Almacena GUID único de instancia para soporte multi-ubicación
+- **`AvoqadoEntityTracking`** - Tabla universal de seguimiento de cambios para órdenes, items, turnos
+  - Clave primaria con constraint único en EntityType + EntityId
+  - Indexado en LastModifiedAt + EntityType para performance
+- **`AvoqadoEntitySnapshots`** - Snapshots de hash de contenido para detectar cambios reales (solo v1)
+  - Constraint único en EntityType + EntityId
+  - Indexado en EntityType + LastSentAt
+
+### Tablas POS Mejoradas
+El servicio agrega columnas timestamp `AvoqadoLastModifiedAt` a:
+- **`tempcheques`** - Headers de orden (194 columnas incluyendo totales, cliente, pagos)
+- **`tempcheqdet`** - Items de orden (productos, cantidades, precios, modificaciones)
+- **`turnos`** - Información de turno (tiempos apertura/cierre, cajero, estación)
+
+### Procedimientos Almacenados
+- **`sp_TrackEntityChange`** - Registra cambios de entidad con timestamps y razones
+- **`sp_GetEntityChanges`** - Obtiene cambios pendientes desde última sincronización (por lotes, máx 100)
+- **`sp_UpdateEntitySnapshot`** - Actualiza snapshots de hash de contenido (solo v1)
+- **`sp_CleanupStuckTracking`** - Procedimiento de mantenimiento para registros atorados
+
+### Triggers de Base de Datos (Compatible SQL Server 2014)
+- **`Trg_Avoqado_Orders`** - Rastrea creación, actualizaciones y eliminaciones de órdenes en `tempcheques`
+- **`Trg_Avoqado_OrderItems`** - Rastrea cambios individuales de items dentro de órdenes en `tempcheqdet`
+- **`Trg_Avoqado_Shifts`** - Rastrea eventos de apertura y cierre de turno en `turnos`
+
+### Estrategia de Índices
+**Claves Primarias:** Las 366 tablas tienen claves primarias definidas para integridad de datos
+**Índices de Performance:**
+- `IX_AvoqadoEntityTracking_Modified` - En LastModifiedAt + EntityType
+- `IX_cheques_workspaceid` - Índice multi-columna para consultas de workspace
+- `IX_cheques_fecha` - Consultas basadas en fecha para reportes
+- `FYI_chequespagos_folio` - Índice de foreign key para búsquedas de pagos
+
+### Relaciones y Integridad de Base de Datos
+El sistema mantiene integridad de datos a través de **189 relaciones de foreign key**:
+- **Relaciones de productos**: `productos` ← `tempcheqdet`, `cheqdet` (items de orden referencian productos)
+- **Relaciones de clientes**: `clientes` ← `tempcheques` (órdenes referencian clientes)
+- **Relaciones de pagos**: `formasdepago` ← `tempchequespagos` (pagos referencian métodos de pago)
+- **Relaciones de área**: `areasrestaurant` ← `tempcheques` (órdenes referencian áreas de restaurante)
+- **Relaciones de empresa**: `empresas` ← múltiples tablas (soporte multi-empresa)
+
+## Formato de Entity ID
+El servicio usa un sistema de ID de entidad jerárquico:
+- **Órdenes**: `{InstanceId}:{IdTurno}:{Folio}` (ej., `abc123:894:1001`)
+- **Items de Orden**: `{InstanceId}:{IdTurno}:{Folio}:{Movimiento}` (ej., `abc123:894:1001:3`)
+- **Turnos**: `{IdTurno}` (ej., `894`)
+
+**NOTA IMPORTANTE**: Todos los Entity IDs usan `idturno` (business key), NO `idturnointerno` (PK técnico)
+
+## Arquitectura Dual-Key de SoftRestaurant
+
+### Patrón Técnico Avanzado
+SoftRestaurant implementa una arquitectura dual-key sofisticada en la tabla `turnos`:
+
+#### Capa Técnica (Base de Datos):
+- **`idturnointerno`**: Primary Key técnico (bigint, auto-increment)
+  - Valores secuenciales: 80885, 80884, 80883...
+  - Usado para optimización de BD e integridad referencial
+  - **NUNCA usado en lógica de aplicación**
+
+#### Capa de Negocio (Aplicaciones POS):
+- **`idturno`**: Business Key operativo (bigint, asignado manualmente)
+  - Valores de negocio: 894, 893, 892...
+  - Usado por todas las aplicaciones POS y lógica de negocio
+  - Referenciado por `tempcheques.idturno` y tablas relacionadas
+
+#### Capa de Integración (Avoqado):
+- **Código correcto**: Usa `idturno` para todas las operaciones
+- **Entity IDs**: Formato `{InstanceId}:{idturno}:{folio}`
+- **Sincronización**: Compatible con la capa de aplicación POS
+
+### Ejemplo Real de la Arquitectura:
+```sql
+-- Registro real en turnos:
+idturnointerno: 80885  (PK técnico - no usar en código)
+idturno: 894          (Business key - USAR en operaciones)
+apertura: 2025-07-25 08:17:04.000
+cajero: AVOQADO
+
+-- Registro relacionado en tempcheques:
+folio: 1
+idturno: 894  (Referencia al business key, no al PK técnico)
+mesa: 22
+```
+
+## Performance y Monitoreo de Base de Datos
+- **Optimización SQL Server 2014**: Consultas optimizadas para características de performance de versión 12.0.4100.1
+- **Uso de Índices**: Aprovecha índices del schema de 366 tablas para performance óptima de consultas
+- **Connection Pooling**: Gestiona límites de conexión de SQL Server 2014 eficientemente
+- **Query Batching**: Limita conjuntos de resultados para prevenir problemas de memoria con datasets grandes
+- **Aislamiento Multi-tenant**: Asegura filtrado de WorkspaceId en todas las operaciones de base de datos
+- **Dual-Key Optimization**: Queries usan `idturno` para compatibilidad con aplicaciones POS existentes
