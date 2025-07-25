@@ -75,13 +75,85 @@ El POS opera bajo un principio fundamental: un ciclo de vida transaccional basad
 
 **Disparador**: El gerente o cajero ejecuta la función "Cerrar Turno".
 
-**Proceso**: El sistema realiza una operación de archivo masivo dentro de una transacción:
+**Proceso**: El sistema realiza una operación de archivo masivo dentro de una transacción única y bien estructurada:
 
-1. **Copia de Datos**: Mueve toda la información de las órdenes (`tempcheques`), sus detalles (`tempcheqdet`), sus pagos (`tempchequespagos`), etc., a las tablas de histórico (`cheques`, `cheqdet`, `chequespagos`).
-2. **Cierre del Turno**: Actualiza la tabla `turnos`, estableciendo una fecha y hora en la columna `cierre` para el turno activo.
-3. **Purga de Temporales**: Una vez que los datos están a salvo en el histórico y el turno está oficialmente cerrado, el sistema ejecuta DELETE sobre las tablas temp* para limpiar todo lo relacionado con el turno recién cerrado.
+#### Secuencia Técnica Detallada (Basada en Trace Real):
+
+1. **Validaciones Pre-Archivo** (Líneas 23-45 del trace):
+   - Verificar que no hay cuentas abiertas: `SELECT * FROM tempcheques WHERE pagado=0 AND cancelado=0`
+   - Verificar integridad de productos y configuraciones
+   - Generar resumen de formas de pago por turno
+
+2. **Fase de Archivo Masivo** (Líneas 79-88 - ~6 segundos):
+   ```sql
+   -- Archivo principal (194 columnas completas)
+   INSERT INTO cheques SELECT * FROM tempcheques WHERE idturno=X
+   
+   -- Archivo de detalles con idturno_cierre
+   INSERT INTO cheqdet SELECT *, 'X' as idturno_cierre FROM tempcheqdet d 
+   INNER JOIN tempcheques t ON d.foliodet = t.folio WHERE t.idturno=X
+   
+   -- Archivo de pagos
+   INSERT INTO chequespagos SELECT *, 'X' as idturno_cierre FROM tempchequespagos p
+   INNER JOIN tempcheques t ON p.folio = t.folio WHERE t.idturno=X
+   ```
+
+3. **Archivo de Datos Auxiliares** (Líneas 83-88):
+   - `INSERT INTO cancela` - Registros de productos cancelados
+   - `INSERT INTO cheqpedidos` - Relaciones orden-pedido
+   - `INSERT INTO bitacoratarjetacredito` - Logs de transacciones de tarjeta
+   - `INSERT INTO bitacoraeasygoband` - Transacciones EasyGo
+   - `INSERT INTO numerostarjetas` - Transacciones de tarjetas de lealtad
+   - `INSERT INTO foliosfacturados` - Relaciones con facturas
+
+4. **Gestión de Mesas y Recursos** (Líneas 89-94):
+   ```sql
+   -- Liberar mesas asignadas al turno
+   UPDATE mesas SET estatus_ocupacion=0 WHERE idmesa IN (
+     SELECT idmesa FROM mesasasignadas WHERE folio IN (
+       SELECT folio FROM tempcheques WHERE idturno=X))
+   
+   -- Limpiar asignaciones
+   DELETE FROM mesasasignadas WHERE folio IN (SELECT folio FROM tempcheques WHERE idturno=X)
+   
+   -- Limpiar cola de producción
+   DELETE FROM PRODUCTOSENPRODUCCION WHERE folio IN (SELECT folio FROM tempcheques WHERE idturno=X)
+   ```
+
+5. **Finalización Crítica del Turno** (Línea 95 - **PUNTO DE DETECCIÓN**):
+   ```sql
+   UPDATE turnos WITH(ROWLOCK) SET 
+     cierre='25/07/2025 02:29:32 PM',
+     efectivo=0.000000,
+     tarjeta=0.000000,
+     vales=0.000000,
+     credito=0.000000,
+     corte_enviado=0 
+   WHERE idturno=894
+   ```
+   - **Performance**: 203ms, 3697 lecturas lógicas
+   - **CRÍTICO**: Este UPDATE es el marcador definitivo de cierre de turno
+   - **Detección Avoqado**: Nuestros triggers detectan este cambio para identificar cierres legítimos
+
+6. **Operaciones Post-Cierre** (Líneas 96-98):
+   ```sql
+   -- Resetear contadores de secuencia
+   UPDATE folios SET ultimaorden=0, ultimofolioproduccion=0 WHERE serie=''
+   UPDATE parametros SET ultimofolioimprimirformatoconcuenta=0
+   
+   -- Confirmar transacción
+   COMMIT TRAN
+   ```
+
+#### Métricas de Performance del Trace Real:
+- **Duración Total**: ~7 segundos (líneas 74-98)
+- **Fase de Archivo**: ~6 segundos (líneas 79-94)
+- **Operación Crítica**: UPDATE turnos = 203ms (línea 95)
+- **Registros Procesados**: 1 orden archivada completa con todos sus datos relacionados
 
 **Lógica Clave**: Este proceso es la razón por la cual no podemos depender de `tempcheques` para consultas históricas. También es la causa del problema que identificamos: las eliminaciones de `tempcheques` al final del turno no son cancelaciones, son parte del ciclo de vida normal del sistema.
+
+**Integración Avoqado**: El servicio detecta el `UPDATE turnos SET cierre=...` como señal definitiva de cierre de turno, permitiendo distinguir entre eliminaciones legítimas (archivo) y cancelaciones de negocio.
 
 ## El Papel de la Integración Avoqado en este Flujo
 

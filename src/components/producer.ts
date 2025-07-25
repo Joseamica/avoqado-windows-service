@@ -3,6 +3,7 @@ import { getDbPool } from '../core/db'
 import { log } from '../core/logger'
 import { publishMessage, POS_EVENTS_EXCHANGE } from '../core/rabbitmq'
 import { loadConfig } from '../config'
+import { serviceStateManager } from '../core/serviceState'
 
 const PRODUCER_VERSION = '2.2.0-debounced'
 const POLLING_INTERVAL_MS = 2000
@@ -12,6 +13,8 @@ const ORDER_DEBOUNCE_MS = 2500 // 2.5 segundos
 
 let lastSyncTimestamp = new Date(Date.now() - 5 * 60 * 1000)
 let isProducerHealthy = true
+let heartbeatInterval: NodeJS.Timeout | null = null
+let pollingInterval: NodeJS.Timeout | null = null
 
 // ✅ NUEVO MAPA: Almacena los temporizadores para cada orden que está en "debounce".
 // La clave es el EntityId de la orden, el valor es el temporizador de Node.js.
@@ -26,6 +29,12 @@ interface ChangeNotification {
 
 async function sendHeartbeat() {
   try {
+    // Verificar si el servicio puede enviar heartbeats
+    if (!serviceStateManager.canSendHeartbeats()) {
+      log.warn('[Heartbeat] ⚠️ Heartbeat omitido - servicio no en estado operativo')
+      return
+    }
+
     const pool = getDbPool()
     const { venueId, posType } = loadConfig()
     const result = await pool.request().query('SELECT TOP 1 InstanceId FROM dbo.AvoqadoInstanceInfo')
@@ -192,6 +201,42 @@ async function pollForChanges() {
   }
 }
 
+/**
+ * Obtiene los datos de shift correctos para una orden.
+ * Si idturno es 0 o null, busca el shift abierto más reciente.
+ * Si idturno tiene valor, busca ese shift específico.
+ */
+async function getShiftDataForOrder(pool: any, orderIdTurno: any): Promise<{ externalId: string }> {
+  try {
+    let query: string
+    let shiftRes: any
+
+    if (!orderIdTurno || orderIdTurno === 0 || orderIdTurno === '0') {
+      // Si la orden no tiene idturno asignado, buscar el shift abierto más reciente
+      log.info('[Order Processor] Orden sin idturno asignado. Buscando shift abierto...')
+      query = 'SELECT TOP 1 WorkspaceId FROM turnos WHERE cierre IS NULL ORDER BY apertura DESC'
+      shiftRes = await pool.request().query(query)
+    } else {
+      // Si la orden tiene idturno, buscar ese shift específico
+      log.info(`[Order Processor] Buscando shift específico con idturno: ${orderIdTurno}`)
+      query = 'SELECT WorkspaceId FROM turnos WHERE idturno = @idturno'
+      shiftRes = await pool.request().input('idturno', sql.BigInt, orderIdTurno).query(query)
+    }
+
+    if (shiftRes.recordset[0] && shiftRes.recordset[0].WorkspaceId) {
+      const workspaceId = shiftRes.recordset[0].WorkspaceId
+      log.info(`[Order Processor] Shift encontrado con WorkspaceId: ${workspaceId}`)
+      return { externalId: workspaceId }
+    } else {
+      log.warn('[Order Processor] No se encontró shift válido. Usando idturno como fallback.')
+      return { externalId: orderIdTurno?.toString() || '0' }
+    }
+  } catch (error) {
+    log.error('[Order Processor] Error buscando shift data:', error)
+    return { externalId: orderIdTurno?.toString() || '0' }
+  }
+}
+
 // ... (Las funciones processOrderChange, processOrderItemChange y processShiftChange no necesitan cambios) ...
 async function processOrderChange(change: ChangeNotification, venueId: string): Promise<{ payload: object } | null> {
   try {
@@ -201,15 +246,29 @@ async function processOrderChange(change: ChangeNotification, venueId: string): 
       return null
     }
     const [instanceId, idturno, folio] = parts
+
     if (change.ChangeReason.includes('deleted')) {
       return { payload: { venueId, orderData: { externalId: change.EntityId, status: 'CANCELLED' } } }
     }
+
     const pool = getDbPool()
-    const orderRes = await pool
-      .request()
-      .input('idturno', sql.BigInt, idturno)
-      .input('folio', sql.Int, folio)
-      .query('SELECT * FROM tempcheques WHERE idturno = @idturno AND folio = @folio')
+    const request = pool.request()
+    let query: string
+
+    // Si idturno está presente y no es una cadena vacía, buscamos con él.
+    if (idturno && idturno !== 'null') {
+      log.info(`[Order Processor] Buscando orden con idturno ${idturno} y folio ${folio}`)
+      request.input('idturno', sql.BigInt, idturno)
+      request.input('folio', sql.Int, folio)
+      query = 'SELECT * FROM tempcheques WHERE idturno = @idturno AND folio = @folio'
+    } else {
+      // Si idturno es nulo o una cadena vacía, buscamos la orden sin turno asignado.
+      log.info(`[Order Processor] Buscando orden con idturno NULO y folio ${folio}`)
+      request.input('folio', sql.Int, folio)
+      query = 'SELECT * FROM tempcheques WHERE idturno IS NULL AND folio = @folio'
+    }
+
+    const orderRes = await request.query(query)
     if (!orderRes.recordset[0]) {
       log.warn(`[Order Processor] No se encontraron datos para ${change.EntityId}.`)
       return null
@@ -267,7 +326,7 @@ async function processOrderChange(change: ChangeNotification, venueId: string): 
       orderData: {
         externalId: change.EntityId,
         orderNumber: posData.folio.toString(),
-        status: posData.cancelado ? 'CANCELLED' : posData.pagado ? 'COMPLETED' : 'PENDING',
+        status: posData.cancelado ? 'CANCELLED' : posData.pagado ? 'COMPLETED' : 'CONFIRMED',
         paymentStatus: posData.pagado ? 'PAID' : 'PENDING',
         subtotal: parseFloat(posData.subtotal || 0),
         taxAmount: parseFloat(posData.totalimpuesto1 || 0),
@@ -285,7 +344,7 @@ async function processOrderChange(change: ChangeNotification, venueId: string): 
       },
       tableData: { externalId: posData.mesa?.toString() || `Mesa ${folio}`, posAreaId: posData.idarearestaurant },
       areaData: { externalId: posData.idarearestaurant, name: posArea?.descripcion || `Área ${posData.idarearestaurant}` },
-      shiftData: { externalId: posData.idturno.toString() },
+      shiftData: await getShiftDataForOrder(pool, posData.idturno),
       payments: paymentsData, // Se añade el array de pagos, estará vacío si la orden no está pagada.
       paymentMethodsCatalog: paymentMethodsCatalog,
     }
@@ -348,7 +407,11 @@ async function processShiftChange(change: ChangeNotification, venueId: string): 
   try {
     const idturno = change.EntityId
     if (change.ChangeReason.includes('deleted')) {
-      return { payload: { venueId, shiftData: { externalId: idturno, status: 'DELETED' } } }
+      // Para deletes, necesitamos buscar el WorkspaceId antes de que se elimine
+      const pool = getDbPool()
+      const shiftRes = await pool.request().input('idturno', sql.BigInt, idturno).query('SELECT WorkspaceId FROM turnos WHERE idturno = @idturno')
+      const workspaceId = shiftRes.recordset[0]?.WorkspaceId || idturno // Fallback al idturno si no se encuentra
+      return { payload: { venueId, shiftData: { externalId: workspaceId, status: 'DELETED' } } }
     }
     const pool = getDbPool()
     const shiftRes = await pool.request().input('idturno', sql.BigInt, idturno).query('SELECT * FROM turnos WHERE idturno = @idturno')
@@ -361,7 +424,7 @@ async function processShiftChange(change: ChangeNotification, venueId: string): 
       payload: {
         venueId,
         shiftData: {
-          externalId: idturno,
+          externalId: posShift.WorkspaceId,
           startTime: posShift.apertura ? new Date(posShift.apertura).toISOString() : null,
           endTime: posShift.cierre ? new Date(posShift.cierre).toISOString() : null,
           staffId: posShift.idmesero,
@@ -377,11 +440,100 @@ async function processShiftChange(change: ChangeNotification, venueId: string): 
 }
 
 /**
+ * Obtiene el instanceId de la base de datos
+ */
+export const getInstanceId = async (): Promise<string> => {
+  try {
+    const pool = getDbPool()
+    const result = await pool.request().query('SELECT TOP 1 InstanceId FROM dbo.AvoqadoInstanceInfo')
+    if (result.recordset.length === 0) throw new Error('Tabla AvoqadoInstanceInfo no encontrada.')
+    return result.recordset[0].InstanceId
+  } catch (error) {
+    log.error('[Producer] Error obteniendo instanceId:', error)
+    throw error
+  }
+}
+
+/**
+ * Detiene los heartbeats
+ */
+export const stopHeartbeat = (): void => {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval)
+    heartbeatInterval = null
+    log.info('[Producer] ⏹️ Heartbeats detenidos')
+  }
+}
+
+/**
+ * Inicia los heartbeats
+ */
+export const startHeartbeat = (): void => {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval)
+  }
+  
+  sendHeartbeat() // Enviar inmediatamente
+  heartbeatInterval = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS)
+  log.info('[Producer] ❤️ Heartbeats iniciados')
+}
+
+/**
+ * Detiene el polling de cambios
+ */
+export const stopPolling = (): void => {
+  if (pollingInterval) {
+    clearInterval(pollingInterval)
+    pollingInterval = null
+    log.info('[Producer] ⏹️ Polling detenido')
+  }
+}
+
+/**
+ * Inicia el polling de cambios
+ */
+export const startPolling = (): void => {
+  if (pollingInterval) {
+    clearInterval(pollingInterval)
+  }
+  
+  pollingInterval = setInterval(pollForChanges, POLLING_INTERVAL_MS)
+  log.info('[Producer] 🔄 Polling iniciado')
+}
+
+/**
+ * Detiene completamente el producer
+ */
+export const stopProducer = (): void => {
+  stopHeartbeat()
+  stopPolling()
+  serviceStateManager.stop('Producer detenido manualmente')
+  log.info('[Producer] ⏹️ Producer completamente detenido')
+}
+
+/**
+ * Reinicia el producer con nueva configuración
+ */
+export const restartProducer = (): void => {
+  log.info('[Producer] 🔄 Reiniciando producer...')
+  stopProducer()
+  
+  // Esperar un momento antes de reiniciar
+  setTimeout(() => {
+    startProducer()
+  }, 2000)
+}
+
+/**
  * Inicia el servicio del producer.
  */
 export const startProducer = () => {
   log.info(`🛡️ Iniciando Producer Resiliente v${PRODUCER_VERSION} (con Debounce y Heartbeat)...`)
-  setInterval(pollForChanges, POLLING_INTERVAL_MS)
-  sendHeartbeat()
-  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS)
+  
+  // Establecer estado inicial
+  serviceStateManager.start()
+  
+  // Iniciar componentes
+  startPolling()
+  startHeartbeat()
 }

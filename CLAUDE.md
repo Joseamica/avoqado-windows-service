@@ -83,8 +83,28 @@ The POS operates on a fundamental principle: a transactional lifecycle based on 
 
 #### Phase 4: Archive & Purge (Shift Close) 🗄️
 - **Tables**: All (temp* to permanent counterparts)
-- **Process**: Copies data to historical tables, closes shift in `turnos`, purges temp* tables
+- **Process**: Complete transactional archiving process within a single transaction
 - **Logic**: DELETE from temp* tables at shift end is normal lifecycle, NOT cancellation
+
+**Technical Implementation (SQL Server 2014 Compatible):**
+1. **Pre-Archive Validation**: Verify shift has no open orders and check constraints
+2. **Master Archive Operations** (within transaction):
+   - `INSERT INTO cheques SELECT * FROM tempcheques WHERE idturno=X`
+   - `INSERT INTO cheqdet SELECT * FROM tempcheqdet d INNER JOIN tempcheques t...`
+   - `INSERT INTO chequespagos SELECT * FROM tempchequespagos p INNER JOIN tempcheques t...`
+3. **Auxiliary Archive Operations**:
+   - `INSERT INTO cancela` - Canceled item records
+   - `INSERT INTO cheqpedidos` - Order-to-delivery mapping
+   - `INSERT INTO bitacoratarjetacredito` - Credit card transaction logs
+   - `INSERT INTO numerostarjetas` - Loyalty card transactions
+   - `INSERT INTO foliosfacturados` - Invoice relationships
+4. **Table Management & Cleanup**:
+   - Free table assignments: `UPDATE mesas SET estatus_ocupacion=0`
+   - Clear production queue: `DELETE FROM PRODUCTOSENPRODUCCION WHERE folio IN...`
+   - Reset counter sequences: `UPDATE folios SET ultimaorden=0, ultimofolioproduccion=0`
+5. **Shift Finalization**: 
+   - `UPDATE turnos SET cierre=GETDATE() WHERE idturno=X` (CRITICAL: This triggers shift close detection)
+   - **NOTE**: Actual DELETE from temp* tables happens AFTER shift close timestamp is set
 
 ### Database Relationships & Integrity
 The system maintains data integrity through **189 foreign key relationships**:
@@ -94,10 +114,38 @@ The system maintains data integrity through **189 foreign key relationships**:
 - **Area relationships**: `areasrestaurant` ← `tempcheques` (orders reference restaurant areas)
 - **Enterprise relationships**: `empresas` ← multiple tables (multi-company support)
 
+### Shift Close Process Technical Details
+
+**Critical Database Operations Sequence:**
+1. **Archive Phase** (Lines 79-88 in trace): 
+   - Data migration from temp* to permanent tables within single transaction
+   - All `INSERT INTO [permanent] SELECT * FROM [temp*] WHERE idturno=X` operations
+   - **Time Duration**: ~6 seconds for full archive process
+   
+2. **Cleanup Phase** (Lines 89-94):
+   - Table status reset and production queue cleanup
+   - Mesa assignments freed and occupancy status cleared
+   
+3. **Finalization Phase** (Line 95):
+   - **CRITICAL**: `UPDATE turnos SET cierre='timestamp' WHERE idturno=X`
+   - This UPDATE is the definitive marker for shift closure
+   - **Performance Note**: Line 95 shows 203ms execution time with 3697 logical reads
+   
+4. **Post-Close Operations** (Lines 96-98):
+   - Sequence counter resets
+   - Transaction commit
+
+**Key Timing Patterns from Real Trace:**
+- **Transaction Start**: `set implicit_transactions on` (Line 74)
+- **Archive Duration**: ~6 seconds (Lines 79-94)  
+- **Shift Close**: `UPDATE turnos SET cierre=...` (Line 95) - **THIS IS THE DETECTION POINT**
+- **Transaction Complete**: `COMMIT TRAN` (Line 98)
+
 ### Avoqado Integration Role:
 - **Triggers**: Act as "microphones" on temp* tables, reporting changes to `AvoqadoEntityTracking`
 - **Producer**: Intelligent debouncing, understands DELETE during shift close ≠ cancellation
-- **Context-Aware**: Distinguishes between business cancellations and normal archiving
+- **Context-Aware**: Detects `turnos.cierre` updates to identify legitimate shift closures
+- **Timing Intelligence**: Uses shift close timestamp detection to prevent spurious deletion events
 - **Multi-tenant**: Uses `WorkspaceId` for proper data isolation
 
 ## Database Integration & SQL Scripts
@@ -232,6 +280,15 @@ The `turnos` table implements a sophisticated dual-key pattern:
 - **Backup System**: Maintains configuration history with rollback capability
 - **Multi-tenant**: WorkspaceId configuration for proper data isolation
 
+## SoftRestaurant Entity Resolution System
+
+The service includes intelligent handling for SoftRestaurant's unique order lifecycle where orders are created with `idturno=0` and later updated to the real shift ID during payment. This prevents duplicate orders in the backend.
+
+**Key Implementation**:
+- **Producer**: Context-aware deletion logic prevents spurious order deletions during shift close
+- **Backend**: Smart entity resolution automatically links orders with different Entity IDs but same folio
+- **Documentation**: See `SOFTRESTAURANT_ENTITY_RESOLUTION.md` for complete technical details
+
 ## Key Technical Details
 
 ### Producer Architecture
@@ -286,9 +343,13 @@ The `turnos` table implements a sophisticated dual-key pattern:
 
 ### Debugging Database Issues
 1. Run `00-Verificacion.sql` for quick status
-2. Use `01-Diagnostico.sql` for detailed analysis
+2. Use `01-Diagnostico.sql` for detailed analysis  
 3. Check logs for trigger execution and SQL errors
 4. Use `04-Pruebas.sql` to validate functionality
+5. Reference `info-soft-rest/` for database schema and SQL traces:
+   - `database-schema/table-definitions.csv` - Complete table list
+   - `database-schema/constraints/foreign-keys.csv` - Relationship mappings
+   - `sql-traces/shift-close-flow.sql` - Real shift close process trace
 
 ## Database Performance & Monitoring
 - **SQL Server 2014 Optimization**: Queries optimized for version 12.0.4100.1 performance characteristics
