@@ -1,0 +1,284 @@
+ -- ========================================
+  -- ORDERS & SHIFTS RELATIONSHIP
+  -- ========================================
+
+  -- Orders for the items we saw earlier
+  SELECT folio, idturno, mesa, subtotal, total, pagado, cancelado, fecha,        
+  WorkspaceId, idmesero, idarearestaurant
+  FROM tempcheques
+  WHERE folio IN (1, 2)
+  ORDER BY folio DESC;
+
+  -- Shift information for those WorkspaceIds
+  SELECT idturnointerno, idturno, WorkspaceId, apertura, cierre, cajero,
+  fondo, efectivo
+  FROM turnos
+  WHERE WorkspaceId IN ('F947B662-238A-46F0-8C6F-FAAA39ED188E',
+  '09B5ED39-DA57-44E5-8DC3-E2D0D3915541',
+  'F39899E3-B2BF-4D34-8A1C-EFCF89CEB904');
+
+  -- All current open shifts
+  SELECT TOP 5 idturnointerno, idturno, WorkspaceId, apertura, cierre, cajero    
+  FROM turnos
+  WHERE cierre IS NULL
+  ORDER BY apertura DESC;
+
+  -- ========================================
+  -- PRODUCT & PRICING STRUCTURE
+  -- ========================================
+
+  -- Product details for the items we saw
+  SELECT idproducto, descripcion, idgrupo, WorkspaceId
+  FROM productos
+  WHERE idproducto IN ('06024', '042141');
+
+  -- Product groups/categories
+  SELECT TOP 10 idgrupo, descripcion
+  FROM grupos;
+
+  -- Main price list structure
+  SELECT TOP 5 *
+  FROM listadeprecios;
+
+  -- Price list details
+  SELECT TOP 5 *
+  FROM listadepreciosdetalle;
+
+  -- ========================================
+  -- STAFF & AREAS
+  -- ========================================
+
+  -- Staff structure
+  SELECT TOP 5 idmesero, nombre, contraseña, WorkspaceId
+  FROM meseros;
+
+  -- Areas structure
+  SELECT TOP 5 idarearestaurant, descripcion, WorkspaceId
+  FROM areasrestaurant;
+
+  -- ========================================
+  -- PAYMENTS
+  -- ========================================
+
+  -- Payment methods catalog
+  SELECT idformadepago, descripcion, tipo
+  FROM formasdepago;
+
+  -- Recent payments (if any exist)
+  SELECT TOP 5 folio, idformadepago, importe, propina, referencia
+  FROM tempchequespagos
+  ORDER BY folio DESC;
+
+  -- ========================================
+  -- AVOQADO INTEGRATION TRACKING
+  -- ========================================
+
+  -- Recent entity changes
+  SELECT TOP 15 EntityType, EntityId, LastModifiedAt, ChangeReason
+  FROM AvoqadoEntityTracking
+  ORDER BY LastModifiedAt DESC;
+
+  -- Instance information
+  SELECT * FROM AvoqadoInstanceInfo;
+
+  -- ========================================
+  -- WORKSPACE CONSISTENCY CHECK
+  -- ========================================
+
+  -- Check if WorkspaceIds are consistent across related entities
+  SELECT
+      tc.folio,
+      tc.WorkspaceId as order_workspace,
+      td.WorkspaceId as item_workspace,
+      tu.WorkspaceId as shift_workspace
+  FROM tempcheques tc
+  JOIN tempcheqdet td ON tc.folio = td.foliodet
+  LEFT JOIN turnos tu ON tc.idturno = tu.idturno
+  WHERE tc.folio IN (1, 2);
+
+  -- ========================================
+  -- ENTITY ID PATTERN VERIFICATION
+  -- ========================================
+
+  -- Let's see what the actual idturno values look like
+  SELECT DISTINCT TOP 10 idturno
+  FROM tempcheques
+  WHERE idturno IS NOT NULL
+  ORDER BY idturno DESC;
+
+  -- Check if there are orders with idturno = 0 or NULL
+  SELECT COUNT(*) as orders_with_null_idturno
+  FROM tempcheques
+  WHERE idturno IS NULL OR idturno = 0;
+
+  -- ========================================
+  -- CURRENT ACTIVE DATA SAMPLE
+  -- ========================================
+
+  -- Most recent complete order with all details
+  SELECT TOP 1
+      tc.folio,
+      tc.idturno,
+      tc.mesa,
+      tc.total,
+      tc.pagado,
+      tc.cancelado,
+      tc.WorkspaceId,
+      tc.fecha,
+      COUNT(td.movimiento) as item_count
+  FROM tempcheques tc
+  LEFT JOIN tempcheqdet td ON tc.folio = td.foliodet
+  WHERE tc.pagado = 1  -- Completed orders
+  GROUP BY tc.folio, tc.idturno, tc.mesa, tc.total, tc.pagado, tc.cancelado,     
+  tc.WorkspaceId, tc.fecha
+  ORDER BY tc.fecha DESC;
+
+  results:
+
+  folio                idturno              mesa                                                                                                 subtotal              total                 pagado cancelado fecha                   WorkspaceId                          idmesero idarearestaurant
+-------------------- -------------------- ---------------------------------------------------------------------------------------------------- --------------------- --------------------- ------ --------- ----------------------- ------------------------------------ -------- ----------------
+2                    0                    2                                                                                                    78.00                 78.00                 0      0         2025-09-20 14:08:05.000 BD5D078A-A10B-4EDF-BF86-4111F8993B95 1        01
+1                    0                    1                                                                                                    73.28                 85.00                 0      0         2025-09-20 14:05:36.000 48D90ECD-6FA6-49D9-8D8E-22D07069175A 1        01
+
+(2 rows affected)
+
+idturnointerno       idturno              WorkspaceId                          apertura                cierre                  cajero          fondo                 efectivo
+-------------------- -------------------- ------------------------------------ ----------------------- ----------------------- --------------- --------------------- ---------------------
+
+(0 rows affected)
+
+idturnointerno       idturno              WorkspaceId                          apertura                cierre                  cajero
+-------------------- -------------------- ------------------------------------ ----------------------- ----------------------- ---------------
+80897                906                  79448C7F-ECFA-4E1D-84EC-ABEDEAC7F961 2025-09-20 13:57:43.000 NULL                    AVOQADO
+
+(1 row affected)
+
+idproducto      descripcion                                                  idgrupo WorkspaceId
+--------------- ------------------------------------------------------------ ------- ------------------------------------
+042141          ORDEN DE KIBIS                                               04      071127C3-D07E-4EF6-8A75-4A8281721657
+06024           CHAYA CON LIMON                                              06      CE692A16-8DD5-4144-8702-5881A0BF18E7
+
+(2 rows affected)
+
+idgrupo descripcion
+------- ------------------------------
+01      BEBIDAS
+02      ALIMENTOS
+03      .
+04      ALIMENTOS RAPPI
+05      BEBIDAS RAPPI
+06      BEBIDAS DESAYUNOS
+07      EXTRAS DESAYUNOS BEBIDAS
+08      EXTRAS DESAYUNOS ALIMENTOS
+09      ALIMENTOS DESAYUNOS
+10      MENU TEMPORADA
+
+(10 rows affected)
+
+idlistaprecio descripcion                                        clavemoneda estatus listadefault
+------------- -------------------------------------------------- ----------- ------- ------------
+
+(0 rows affected)
+
+idlistaprecio idlistapreciodetalle idproducto      precio                preciosinimpuesto
+------------- -------------------- --------------- --------------------- ---------------------
+
+(0 rows affected)
+
+idmesero nombre                                                       contraseña                     WorkspaceId
+-------- ------------------------------------------------------------ ------------------------------ ------------------------------------
+ALE      ALEJANDRA NAVARRETE                                          2002                           7653F688-433F-4B6F-B810-6342EE27A201
+03       MAYRA PEREZ                                                  0214                           05B9D461-4018-4E49-AA47-CD3651AB59F2
+ANG      ANYER FLORES                                                 2304                           77F058D0-5BAC-46BA-8DA8-61E1A9BCE8AE
+EMI      EMILIO CANCHE                                                987654321                      9DF9E89C-D817-43D6-B245-C4D00AE5E844
+ABI      ABIGAIL MAI                                                  1307                           231A12C1-B968-4553-8D68-15A734CA1984
+
+(5 rows affected)
+
+idarearestaurant descripcion                    WorkspaceId
+---------------- ------------------------------ ------------------------------------
+01               COMEDOR                        5E397DF6-C3FD-48BC-AA5E-A4C46F01348B
+02               DOMICILIO                      E8E12CFC-BF62-4273-9300-0E9B30EDC76F
+03               RAPIDO                         5D9520A3-BDC0-40D3-8A0D-0784CE08666E
+04               TERRAZA                        A11E80C7-3A28-448D-AED5-B3CDA6331BAC
+05               RAPPI Domicilio                55F6157E-E4A9-44A4-9A94-34ED445CC009
+
+(5 rows affected)
+
+idformadepago descripcion                    tipo
+------------- ------------------------------ ---------------------------------------
+08            POR PAGAR                      4
+09            AMEX                           2
+10            RAPPI                          4
+11            UBER                           4
+ACASH         AVOQADO CASH                   1
+AEF           EFECTIVO                       1
+CRE           TAR. CREDITO                   2
+DEB           TAR. DEBITO                    2
+MPY           MARC PAYMENTS                  4
+MRW           MARC REWARDS                   4
+SRPC          SRP CRÉDITO                    2
+SRPD          SRP DÉBITO                     2
+TPY           TOKENCASH PAYMENTS             4
+TRW           TOKENCASH REWARDS              4
+
+(14 rows affected)
+
+folio                idformadepago importe               propina               referencia
+-------------------- ------------- --------------------- --------------------- ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+(0 rows affected)
+
+EntityType                                         EntityId                                                                                                                                                                                                 LastModifiedAt              ChangeReason
+-------------------------------------------------- -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- --------------------------- ----------------------------------------------------------------------------------------------------
+order                                              3DD79592-4347-4C41-8F77-E545AB5CCE0F:0:2                                                                                                                                                                 2025-09-20 20:09:12.0200000 order_updated
+orderitem                                          3DD79592-4347-4C41-8F77-E545AB5CCE0F:0:2:2                                                                                                                                                               2025-09-20 20:09:09.6870000 item_created
+orderitem                                          3DD79592-4347-4C41-8F77-E545AB5CCE0F:0:2:1                                                                                                                                                               2025-09-20 20:08:18.5230000 item_created
+order                                              3DD79592-4347-4C41-8F77-E545AB5CCE0F:0:1                                                                                                                                                                 2025-09-20 20:05:53.2300000 order_updated
+orderitem                                          3DD79592-4347-4C41-8F77-E545AB5CCE0F:0:1:1                                                                                                                                                               2025-09-20 20:05:50.6770000 item_updated
+shift                                              906                                                                                                                                                                                                      2025-09-20 19:57:43.2730000 shift_created
+shift                                              905                                                                                                                                                                                                      2025-09-20 19:53:45.3800000 shift_updated
+order                                              3DD79592-4347-4C41-8F77-E545AB5CCE0F:905:2                                                                                                                                                               2025-09-20 19:53:45.3270000 order_deleted
+orderitem                                          3DD79592-4347-4C41-8F77-E545AB5CCE0F:905:2:2                                                                                                                                                             2025-09-20 19:53:45.2700000 item_deleted
+orderitem                                          3DD79592-4347-4C41-8F77-E545AB5CCE0F:905:2:1                                                                                                                                                             2025-09-20 19:53:45.2700000 item_deleted
+orderitem                                          3DD79592-4347-4C41-8F77-E545AB5CCE0F:0:1:2                                                                                                                                                               2025-09-20 18:16:39.7400000 item_deleted
+shift                                              904                                                                                                                                                                                                      2025-09-16 13:18:35.5130000 shift_updated
+shift                                              903                                                                                                                                                                                                      2025-09-15 22:53:06.9370000 shift_updated
+shift                                              902                                                                                                                                                                                                      2025-07-29 14:54:14.6600000 shift_updated
+shift                                              901                                                                                                                                                                                                      2025-07-28 16:17:48.4300000 shift_updated
+
+(15 rows affected)
+
+InstanceId                           CreatedAt                   Version
+------------------------------------ --------------------------- --------------------
+3DD79592-4347-4C41-8F77-E545AB5CCE0F 2025-07-15 15:47:04.8430000 2.2.0
+
+(1 row affected)
+
+folio                order_workspace                      item_workspace                       shift_workspace
+-------------------- ------------------------------------ ------------------------------------ ------------------------------------
+1                    48D90ECD-6FA6-49D9-8D8E-22D07069175A F39899E3-B2BF-4D34-8A1C-EFCF89CEB904 NULL
+2                    BD5D078A-A10B-4EDF-BF86-4111F8993B95 09B5ED39-DA57-44E5-8DC3-E2D0D3915541 NULL
+2                    BD5D078A-A10B-4EDF-BF86-4111F8993B95 F947B662-238A-46F0-8C6F-FAAA39ED188E NULL
+
+(3 rows affected)
+
+idturno
+--------------------
+0
+
+(1 row affected)
+
+orders_with_null_idturno
+------------------------
+2
+
+(1 row affected)
+
+folio                idturno              mesa                                                                                                 total                 pagado cancelado WorkspaceId                          fecha                   item_count
+-------------------- -------------------- ---------------------------------------------------------------------------------------------------- --------------------- ------ --------- ------------------------------------ ----------------------- -----------
+
+(0 rows affected)
+
+
+Completion time: 2025-09-20T14:39:24.3339706-06:00

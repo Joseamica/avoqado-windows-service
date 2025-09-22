@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlcmd:*)",
+      "Bash(set SQLCMDPASSWORD=National09)",
+      "Bash($env:SQLCMDPASSWORD = 'National09')",
+      "Bash(export SQLCMDPASSWORD='National09')",
+      "Bash(node:*)",
+      "Bash(dir:*)",
+      "Read(//c/avoqado-rabbitmq-windows-service/src/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\amieva\\Documents\\Avoqado\\backend"
+    ]
+  }
+}

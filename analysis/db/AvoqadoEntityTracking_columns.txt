@@ -1,0 +1,16 @@
+COLUMN_NAME                                                                                                                      DATA_TYPE                                                              
+                                                          IS_NULLABLE
+-------------------------------------------------------------------------------------------------------------------------------- -----------------------------------------------------------------------
+--------------------------------------------------------- -----------
+Id                                                                                                                               bigint                                                                 
+                                                          NO         
+EntityType                                                                                                                       varchar                                                                
+                                                          NO         
+EntityId                                                                                                                         varchar                                                                
+                                                          NO         
+LastModifiedAt                                                                                                                   datetime2                                                              
+                                                          NO         
+ChangeReason                                                                                                                     varchar                                                                
+                                                          YES        
+
+(5 rows affected)

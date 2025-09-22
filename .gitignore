@@ -9,6 +9,7 @@ syncState.json
 /logs
 *.log
 
+
 # Archivos de entorno
 .env
 

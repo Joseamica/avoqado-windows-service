@@ -41,7 +41,11 @@ const connectWithRetry = async (): Promise<void> => {
   } catch (error: any) {
     log.error('🔥 Falla catastrófica al conectar con SQL Server, reintentando en 10s...', error.message)
     pool = null
-    setTimeout(connectWithRetry, 10000)
+    isConnecting = false
+
+    // Wait 10 seconds and retry, but throw the error to prevent continuation
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    return await connectWithRetry()
   } finally {
     isConnecting = false
   }

@@ -1,0 +1,3 @@
+CREATE PROCEDURE dbo.sp_TrackEntityChange @entityType VARCHAR(50), @entityId VARCHAR(200), @changeReason VARCHAR(100) AS BEGIN SET NOCOUNT ON; IF EXISTS (SELECT 1 FROM AvoqadoEntityTracking WHERE EntityType = @entityType AND EntityId = @entityId) BEGIN UP
+DATE AvoqadoEntityTracking SET LastModifiedAt = GETUTCDATE(), ChangeReason = @changeReason WHERE EntityType = @entityType AND EntityId = @entityId; END ELSE BEGIN INSERT INTO AvoqadoEntityTracking (EntityType, EntityId, ChangeReason) VALUES (@entityType, 
+@entityId, @changeReason); END END                                                                                                                                                                                                                             
