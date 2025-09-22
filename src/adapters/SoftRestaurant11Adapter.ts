@@ -377,21 +377,34 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
           totalPaid: totalAfterPayment
         }
       } else {
-        // PAGO PARCIAL - Solo rastrear el pago SIN modificar cantidades ni totales
-        log.info(`[Adapter SR11] 💰 Registrando pago parcial de ${payment.amount} sin modificar orden`)
+        // PAGO PARCIAL - Ajustar cantidades en la orden original
+        log.info(`[Adapter SR11] 💰 Aplicando pago parcial de ${payment.amount} ajustando cantidades`)
 
-        // Solo registrar el pago para auditoría y observaciones
+        // Calcular ratio de pago (porcentaje pagado)
+        const paymentRatio = payment.amount / orderData.total
+        const remainingRatio = 1 - paymentRatio
+
+        log.info(`[Adapter SR11] Ratio de pago: ${paymentRatio}, Ratio restante: ${remainingRatio}`)
+
+        // Ajustar cantidades de todos los items proporcionalmente
+        await this.adjustOrderItemQuantities(folio, remainingRatio, transaction)
+
+        // Calcular nuevo total (cantidad restante)
+        const newTotal = orderData.total - payment.amount
+
+        // Actualizar el total de la orden con información del pago
+        await this.updateOrderTotal(folio, newTotal, payment.amount, payment, transaction)
+        log.info(`[Adapter SR11] Total actualizado - Anterior: ${orderData.total}, Nuevo: ${newTotal}`)
+
+        // Registrar el pago para auditoría
         await this.trackPartialPayment(folio, payment.amount, payment, transaction)
 
-        // Calcular el restante basado en el total original menos todos los pagos
-        const remaining = orderData.total - (existingPayments + payment.amount)
-
         await transaction.commit()
-        log.info(`[Adapter SR11] 💰 Pago parcial registrado. Total orden: ${orderData.total}, Total pagado: ${existingPayments + payment.amount}, Restante: ${remaining}`)
+        log.info(`[Adapter SR11] 💰 Pago parcial aplicado. Orden ${folio} restante: ${newTotal}`)
 
         return {
           closed: false,
-          remaining: remaining,
+          remaining: newTotal,
           totalPaid: existingPayments + payment.amount
         }
       }
