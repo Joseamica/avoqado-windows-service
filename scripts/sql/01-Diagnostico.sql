@@ -69,15 +69,15 @@ SELECT
     name AS ProcedureName,
     create_date AS CreatedDate,
     CASE 
-        WHEN name IN ('sp_TrackEntityChange', 'sp_GetEntityChanges', 'sp_UpdateEntitySnapshot') THEN N'✅ Core Avoqado'
+        WHEN name IN ('sp_GetPendingChanges', 'sp_MarkChangesProcessed', 'sp_ApplyPartialPayment') THEN N'✅ Core Avoqado'
         WHEN name = 'sp_CleanupStuckTracking' THEN N'✅ Utilidad Avoqado'
         ELSE N'❓ Verificar'
     END AS Status
 FROM sys.procedures
 WHERE name IN (
-    'sp_TrackEntityChange', 
-    'sp_GetEntityChanges', 
-    'sp_UpdateEntitySnapshot', 
+    'sp_GetPendingChanges',
+    'sp_MarkChangesProcessed',
+    'sp_ApplyPartialPayment',
     'sp_CleanupStuckTracking'
 )
 OR LOWER(name) LIKE '%avoqado%'
@@ -154,7 +154,7 @@ IF EXISTS (SELECT 1 FROM sys.triggers WHERE name IN ('Trg_Avoqado_Orders', 'Trg_
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name IN ('AvoqadoEntitySnapshots', 'AvoqadoEntityTracking'))
     SET @HasTables = 1;
 
-IF EXISTS (SELECT 1 FROM sys.procedures WHERE name IN ('sp_TrackEntityChange', 'sp_GetEntityChanges'))
+IF EXISTS (SELECT 1 FROM sys.procedures WHERE name IN ('sp_GetPendingChanges', 'sp_MarkChangesProcessed'))
     SET @HasProcs = 1;
 
 PRINT N'  🔸 Columnas AvoqadoLastModifiedAt: ' + CASE WHEN @HasColumns = 1 THEN N'✅ Existen' ELSE N'❌ No existen' END;

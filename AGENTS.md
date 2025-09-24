@@ -535,3 +535,32 @@ GROUP BY
 - **Windows Event Log**: Critical errors logged to system event log
 - **Performance Metrics**: Database query times and message processing rates
 - **SQL Server Metrics**: Connection pool status, query execution times, deadlock detection
+
+## 🚨 CRITICAL: Documentation Synchronization Rule
+
+**MANDATORY REQUIREMENT**: Every time ANY change is made to:
+- Database schema (tables, columns, procedures, triggers)
+- Stored procedure signatures or functionality
+- Integration architecture or data flow
+- Entity ID formats or tracking mechanisms
+- Core system behavior or implementation
+
+**MUST IMMEDIATELY UPDATE ALL DOCUMENTATION FILES:**
+- `CLAUDE.md` (primary project documentation)
+- `AGENTS.md` (agent-specific documentation)
+- `docs/SoftRestaurant_Master_Documentation.md` (master reference)
+- Any relevant SQL diagnostic/test scripts
+
+**WHY THIS IS CRITICAL:**
+- Documentation drift leads to confusion and incorrect assumptions
+- Outdated docs can cause developers to implement deprecated patterns
+- Inconsistent documentation wastes debugging time
+- New team members will follow outdated guidance
+
+**PROCESS:**
+1. Make the technical change
+2. IMMEDIATELY update all related documentation
+3. Verify documentation consistency across all files
+4. Test that examples in documentation actually work
+
+**NO EXCEPTIONS**: Documentation updates are NOT optional - they are part of the change implementation.

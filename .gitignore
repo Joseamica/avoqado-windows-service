@@ -22,4 +22,6 @@ Thumbs.db
 /AvoqadoSyncService.exe
 
 
+# Local Claude config
 .claude/settings.local.json
+

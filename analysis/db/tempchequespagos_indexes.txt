@@ -1,1 +1,0 @@
-El objeto 'dbo.tempchequespagos' no tiene ningún índice o el usuario no tiene permisos.

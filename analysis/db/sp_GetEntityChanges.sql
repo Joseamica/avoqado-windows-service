@@ -1,2 +1,0 @@
-CREATE PROCEDURE dbo.sp_GetEntityChanges @lastSyncTimestamp DATETIME2, @maxResults INT = 100 AS BEGIN SET NOCOUNT ON; SELECT TOP (@maxResults) EntityType, EntityId, LastModifiedAt, ChangeReason FROM AvoqadoEntityTracking WHERE LastModifiedAt > @lastSyncTi
-mestamp ORDER BY LastModifiedAt ASC; END                                                                                                                                                                                                                       
