@@ -266,16 +266,14 @@ transactional lifecycle.
 #### Avoqado Integration Tables
 
 - **`AvoqadoInstanceInfo`** - Stores unique instance GUID for multi-location support
-- **`AvoqadoEntityTracking`** - Universal change tracking table for orders, items, shifts
+- **`AvoqadoTracking`** - Universal change tracking table for orders, items, shifts, payments
   - Primary key with unique constraint on EntityType + EntityId
-  - Indexed on LastModifiedAt + EntityType for performance
-- **`AvoqadoEntitySnapshots`** - Content hash snapshots to detect actual changes (v1 only)
-  - Unique constraint on EntityType + EntityId
-  - Indexed on EntityType + LastSentAt
+  - Indexed on Timestamp + EntityType for performance
+  - Tracks Operation (CREATE, UPDATE, DELETE) and ProcessedAt timestamp
 
 #### Enhanced POS Tables
 
-The service adds `AvoqadoLastModifiedAt` timestamp columns to:
+The service integrates with existing POS tables through trigger-based change tracking:
 
 - **`tempcheques`** - Order headers (194 columns including totals, customer, payments)
 - **`tempcheqdet`** - Order line items (products, quantities, prices, modifications)
@@ -283,10 +281,9 @@ The service adds `AvoqadoLastModifiedAt` timestamp columns to:
 
 #### Stored Procedures
 
-- **`sp_TrackEntityChange`** - Records entity changes with timestamps and reasons
-- **`sp_GetEntityChanges`** - Retrieves pending changes since last sync (batched, max 100)
-- **`sp_UpdateEntitySnapshot`** - Updates content hash snapshots (v1 only)
-- **`sp_CleanupStuckTracking`** - Maintenance procedure for stuck records
+- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (batched, max 100)
+- **`sp_MarkChangesProcessed`** - Marks changes as processed after successful sync
+- **`sp_ApplyPartialPayment`** - Handles partial payment processing and validation
 
 #### Database Triggers (SQL Server 2014 Compatible)
 
@@ -409,10 +406,9 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 **Avoqado-Specific Components**:
 
 **Stored Procedures**:
-- `sp_AddPartialPayment.sql` - Partial payment processing
-- `sp_ProcessPartialPayments.sql` - Payment batch processing
-- `sp_GenerateEntityId.sql` - Entity ID generation logic
-- `sp_TrackEntityChange.sql` - Change tracking system
+- `sp_GetPendingChanges.sql` - Retrieves unprocessed entity changes for sync
+- `sp_MarkChangesProcessed.sql` - Marks changes as processed after sync
+- `sp_ApplyPartialPayment.sql` - Partial payment processing and validation
 
 **Functions**:
 - `fn_CanCompleteOrderPayment.sql` - Payment validation logic
@@ -547,7 +543,7 @@ updated to the real shift ID during payment. This prevents duplicate orders in t
 ### Producer Architecture
 
 - **Version Detection**: Automatically detects SoftRestaurant version using `parametros2.versiondb` on startup (v2.4.0+)
-- **Polling**: Executes `sp_GetEntityChanges` every 2 seconds with batching (max 100 results)
+- **Polling**: Executes `sp_GetPendingChanges` every 2 seconds with batching (max 100 results)
 - **SQL Server 2014 Compatibility**: Uses T-SQL syntax compatible with version 12.0.4100.1
 - **Debouncing**: Order updates batched for 2.5 seconds to reduce message volume
 - **Event Types**: `created`, `updated`, `deleted` for orders; `created`, `updated`, `deleted` for items

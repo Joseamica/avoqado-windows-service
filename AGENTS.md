@@ -259,10 +259,9 @@ The service adds `AvoqadoLastModifiedAt` timestamp columns to:
 
 #### Stored Procedures
 
-- **`sp_TrackEntityChange`** - Records entity changes with timestamps and reasons
-- **`sp_GetEntityChanges`** - Retrieves pending changes since last sync (batched, max 100)
-- **`sp_UpdateEntitySnapshot`** - Updates content hash snapshots (v1 only)
-- **`sp_CleanupStuckTracking`** - Maintenance procedure for stuck records
+- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (batched, max 100)
+- **`sp_MarkChangesProcessed`** - Marks changes as processed after successful sync
+- **`sp_ApplyPartialPayment`** - Handles partial payment processing and validation
 
 #### Database Triggers (SQL Server 2014 Compatible)
 
@@ -378,7 +377,7 @@ updated to the real shift ID during payment. This prevents duplicate orders in t
 ### Producer Architecture
 
 - **Version Detection**: Automatically detects SoftRestaurant version using `parametros2.versiondb` on startup (v2.4.0+)
-- **Polling**: Executes `sp_GetEntityChanges` every 2 seconds with batching (max 100 results)
+- **Polling**: Executes `sp_GetPendingChanges` every 2 seconds with batching (max 100 results)
 - **SQL Server 2014 Compatibility**: Uses T-SQL syntax compatible with version 12.0.4100.1
 - **Debouncing**: Order updates batched for 2.5 seconds to reduce message volume
 - **Event Types**: `created`, `updated`, `deleted` for orders; `created`, `updated`, `deleted` for items

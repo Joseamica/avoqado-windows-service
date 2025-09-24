@@ -2,7 +2,18 @@ import sql from 'mssql'
 import { getDbPool } from '../core/db'
 import { log } from '../core/logger'
 import { createEmptyOrder } from '../services/Orders/createEmptyOrder'
-import { IPOSAdapter, OrderAddItemData, OrderCreateData, PaymentData, ShiftCloseData, ShiftOpenData, IntelligentPaymentData, PaymentResult } from './IPosAdapter'
+import {
+  IPOSAdapter,
+  OrderAddItemData,
+  OrderCreateData,
+  PaymentData,
+  ShiftCloseData,
+  ShiftOpenData,
+  IntelligentPaymentData,
+  PaymentResult,
+  FastPaymentData,
+  FastPaymentResult
+} from './IPosAdapter'
 
 export class SoftRestaurant11Adapter implements IPOSAdapter {
   // =================================================================
@@ -955,6 +966,208 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       reference: 'Split order adjustment'
     }
     await this.updateOrderTotal(parentFolio, newTotal, 0, tempPayment, transaction)
+  }
+
+  /**
+   * ✅ NUEVO: Crea un pago rápido (fast payment)
+   * Este tipo de pago crea una orden especial con un producto genérico y la cierra inmediatamente.
+   * Es útil para registrar transacciones rápidas sin necesidad de crear una orden completa.
+   */
+  async createFastPayment(data: FastPaymentData): Promise<FastPaymentResult> {
+    log.info(`[Adapter SR11] 💰 Creando pago rápido por $${data.amount}`)
+
+    const pool = getDbPool()
+    const transaction = new sql.Transaction(pool)
+
+    try {
+      await transaction.begin()
+
+      // 1. Obtener información del turno actual
+      const shiftResult = await new sql.Request(transaction).query(`
+        SELECT TOP 1 idturno, idestacion
+        FROM turnos
+        WHERE cierre IS NULL
+        ORDER BY apertura DESC
+      `)
+
+      if (shiftResult.recordset.length === 0) {
+        throw new Error('No hay un turno abierto. Debe abrir un turno antes de crear pagos rápidos.')
+      }
+
+      const currentShift = shiftResult.recordset[0]
+      const idTurno = currentShift.idturno
+      const idEstacion = currentShift.idestacion
+
+      // 2. Obtener el próximo número de orden
+      const foliosResult = await new sql.Request(transaction).query(`
+        SELECT ultimaorden FROM folios WHERE serie = ''
+      `)
+      const nextOrden = foliosResult.recordset[0]?.ultimaorden + 1 || 1
+
+      // 3. Usar producto por defecto para pagos rápidos o el especificado
+      const productId = data.productId || 'FASTPAY'
+
+      // 4. Crear la orden con tipoventarapida = 1
+      const insertOrderResult = await new sql.Request(transaction)
+        .input('idturno', sql.BigInt, idTurno)
+        .input('idmesero', sql.VarChar, data.cashierPosId)
+        .input('idestacion', sql.VarChar, idEstacion)
+        .input('orden', sql.Numeric, nextOrden)
+        .input('total', sql.Money, data.amount)
+        .input('observaciones', sql.VarChar, data.notes || `Pago rápido: ${data.reference || ''}`)
+        .query(`
+          INSERT INTO tempcheques (
+            seriefolio, numcheque, fecha, mesa, nopersonas, idmesero,
+            pagado, cancelado, impreso, impresiones, cambio, descuento, orden,
+            idcliente, idarearestaurant, idempresa, tipodeservicio, idturno,
+            estacion, usuarioapertura, tipoventarapida, totalarticulos,
+            subtotal, subtotalsinimpuestos, total, totalconpropina,
+            totalimpuesto1, cargo, totalconcargo, totalconpropinacargo,
+            efectivo, tarjeta, vales, otros, observaciones
+          ) VALUES (
+            '', 0, GETDATE(), 'FAST', 1, @idmesero,
+            0, 0, 0, 0, 0, 0, @orden,
+            '', '01', '0000000001', 3, @idturno,  -- tipodeservicio=3 para venta rápida
+            @idestacion, @idmesero, 1, 1,  -- tipoventarapida=1
+            @total, @total, @total, @total,
+            0, 0, @total, @total,
+            0, 0, 0, 0, @observaciones
+          );
+          SELECT SCOPE_IDENTITY() AS newFolio
+        `)
+
+      const newFolio = insertOrderResult.recordset[0].newFolio
+
+      // 5. Actualizar contador de órdenes
+      await new sql.Request(transaction)
+        .input('nextOrden', sql.Numeric, nextOrden)
+        .query("UPDATE folios SET ultimaorden = @nextOrden WHERE serie=''")
+
+      // 6. Agregar el producto con el precio del pago
+      const movimientoResult = await new sql.Request(transaction)
+        .input('folio', sql.BigInt, newFolio)
+        .query('SELECT ISNULL(MAX(movimiento), 0) + 1 AS nextMovimiento FROM tempcheqdet WHERE foliodet = @folio')
+
+      const nextMovimiento = movimientoResult.recordset[0].nextMovimiento
+
+      await new sql.Request(transaction)
+        .input('foliodet', sql.BigInt, newFolio)
+        .input('movimiento', sql.Int, nextMovimiento)
+        .input('cantidad', sql.Float, 1)
+        .input('idproducto', sql.VarChar, productId)
+        .input('precio', sql.Money, data.amount)
+        .input('preciosinimpuestos', sql.Money, data.amount)
+        .input('idestacion', sql.VarChar, idEstacion)
+        .query(`
+          INSERT INTO tempcheqdet (
+            foliodet, movimiento, comanda, cantidad, idproducto,
+            descuento, precio, preciosinimpuestos, tiempo, hora,
+            modificador, idestacion, impuesto1, impuesto2, impuesto3
+          ) VALUES (
+            @foliodet, @movimiento, '', @cantidad, @idproducto,
+            0, @precio, @preciosinimpuestos, '', GETDATE(),
+            0, @idestacion, 0, 0, 0
+          )
+        `)
+
+      // 7. Marcar como impreso (requisito para poder pagar)
+      const numChequeResult = await new sql.Request(transaction).query(`
+        SELECT ISNULL(MAX(numcheque), 0) + 1 AS nextNumCheque
+        FROM tempcheques
+        WHERE idturno = ${idTurno}
+      `)
+
+      const numCheque = numChequeResult.recordset[0].nextNumCheque
+
+      await new sql.Request(transaction)
+        .input('folio', sql.BigInt, newFolio)
+        .input('numcheque', sql.Numeric, numCheque)
+        .query(`
+          UPDATE tempcheques
+          SET impreso = 1, numcheque = @numcheque, impresiones = 1
+          WHERE folio = @folio
+        `)
+
+      // 8. Aplicar el pago
+      const paymentAmount = data.amount
+      const paymentMethod = data.posPaymentMethodId
+
+      // Determinar los campos de pago según el método
+      let efectivo = 0, tarjeta = 0, vales = 0, otros = 0
+      switch (paymentMethod.toUpperCase()) {
+        case 'AEF':  // Efectivo en el sistema
+        case 'EF':
+        case 'CASH':
+        case 'ACASH':
+          efectivo = paymentAmount
+          break
+        case 'CRE':  // Tarjeta de crédito
+        case 'DEB':  // Tarjeta de débito
+        case 'CARD':
+        case 'ACARD':
+        case 'SRPC':
+        case 'SRPD':
+          tarjeta = paymentAmount
+          break
+        case 'VALE':
+          vales = paymentAmount
+          break
+        default:
+          otros = paymentAmount
+      }
+
+      // Insertar el pago
+      await new sql.Request(transaction)
+        .input('folio', sql.BigInt, newFolio)
+        .input('idformadepago', sql.VarChar, paymentMethod)
+        .input('importe', sql.Money, paymentAmount)
+        .input('referencia', sql.VarChar, data.reference || '')
+        .query(`
+          INSERT INTO tempchequespagos (
+            folio, idformadepago, importe, propina, referencia
+          ) VALUES (
+            @folio, @idformadepago, @importe, 0, @referencia
+          )
+        `)
+
+      // 9. Marcar la orden como pagada
+      await new sql.Request(transaction)
+        .input('folio', sql.BigInt, newFolio)
+        .input('efectivo', sql.Money, efectivo)
+        .input('tarjeta', sql.Money, tarjeta)
+        .input('vales', sql.Money, vales)
+        .input('otros', sql.Money, otros)
+        .input('usuariopago', sql.VarChar, data.cashierPosId)
+        .query(`
+          UPDATE tempcheques
+          SET pagado = 1,
+              efectivo = @efectivo,
+              tarjeta = @tarjeta,
+              vales = @vales,
+              otros = @otros,
+              usuariopago = @usuariopago
+          WHERE folio = @folio
+        `)
+
+      // 10. Commit de la transacción
+      await transaction.commit()
+
+      log.info(`[Adapter SR11] ✅ Pago rápido creado exitosamente - Folio: ${newFolio}, Cheque: ${numCheque}`)
+
+      return {
+        folio: newFolio,
+        checkNumber: numCheque,
+        transactionTime: new Date(),
+        totalAmount: data.amount,
+        paymentMethod: this.getPaymentMethodName(paymentMethod),
+        success: true
+      }
+
+    } catch (error: any) {
+      await transaction.rollback()
+      log.error(`[Adapter SR11] Error al crear pago rápido: ${error.message}`)
+      throw error
+    }
   }
 
 }

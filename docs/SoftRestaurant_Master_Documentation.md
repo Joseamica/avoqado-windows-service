@@ -79,7 +79,8 @@ This master documentation serves as the central reference for understanding Soft
   - `sp_AddPartialPayment.sql` - Partial payment processing
   - `sp_ProcessPartialPayments.sql` - Payment batch processing
   - `sp_GenerateEntityId.sql` - Entity ID generation
-  - `sp_TrackEntityChange.sql` - Change tracking
+  - `sp_GetPendingChanges.sql` - Retrieves changes for sync
+  - `sp_MarkChangesProcessed.sql` - Marks changes as processed
 
 - **Functions**:
   - `fn_CanCompleteOrderPayment.sql` - Payment validation

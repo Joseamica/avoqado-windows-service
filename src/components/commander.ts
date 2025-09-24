@@ -1,7 +1,15 @@
 import { ConsumeMessage } from 'amqplib'
 import { log } from '../core/logger'
 import { getRabbitMQChannel } from '../core/rabbitmq'
-import { IPOSAdapter, OrderCreateData, OrderAddItemData, IntelligentPaymentData, ShiftOpenData, ShiftCloseData } from '../adapters/IPosAdapter'
+import {
+  IPOSAdapter,
+  OrderCreateData,
+  OrderAddItemData,
+  IntelligentPaymentData,
+  ShiftOpenData,
+  ShiftCloseData,
+  FastPaymentData
+} from '../adapters/IPosAdapter'
 import { SoftRestaurant11Adapter } from '../adapters/SoftRestaurant11Adapter'
 import { loadConfig } from '../config'
 
@@ -84,6 +92,23 @@ const handleCommand = async (msg: ConsumeMessage | null) => {
         await adapter.closeShift(shiftCloseData.shiftId, shiftCloseData)
 
         log.info(`[Comandante] ✅ Turno ${shiftCloseData.shiftId} cerrado exitosamente`)
+        break
+
+      case 'FastPayment.CREATE':
+        // ✅ NUEVO: Manejo de pagos rápidos (fast payments)
+        const fastPaymentData = payload as FastPaymentData
+        if (!fastPaymentData.amount || !fastPaymentData.posPaymentMethodId || !fastPaymentData.cashierPosId) {
+          throw new Error("El payload para 'FastPayment.CREATE' debe incluir 'amount', 'posPaymentMethodId' y 'cashierPosId'.")
+        }
+
+        log.info(`[Comandante] Creando pago rápido por $${fastPaymentData.amount} con método ${fastPaymentData.posPaymentMethodId}`)
+        const fastPaymentResult = await adapter.createFastPayment(fastPaymentData)
+
+        if (fastPaymentResult.success) {
+          log.info(`[Comandante] ✅ Pago rápido creado exitosamente. Folio: ${fastPaymentResult.folio}, Cheque: ${fastPaymentResult.checkNumber}, Total: $${fastPaymentResult.totalAmount}`)
+        } else {
+          log.error(`[Comandante] ❌ Error al crear pago rápido`)
+        }
         break
 
       default:

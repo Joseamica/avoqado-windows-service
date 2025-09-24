@@ -68,6 +68,25 @@ export interface ProductCreateData {
   sku: string
   // ... otros campos del producto
 }
+
+export interface FastPaymentData {
+  amount: number // Monto del pago rápido
+  posPaymentMethodId: string // Método de pago (EF, CARD, etc.)
+  reference?: string // Referencia opcional del pago
+  productId?: string // ID del producto a usar (opcional, usa default si no se especifica)
+  cashierPosId: string // ID del cajero que registra el pago
+  notes?: string // Notas adicionales
+}
+
+export interface FastPaymentResult {
+  folio: number // Folio de la transacción creada
+  checkNumber: number // Número de cheque asignado
+  transactionTime: Date // Hora de la transacción
+  totalAmount: number // Monto total registrado
+  paymentMethod: string // Método de pago usado
+  success: boolean // Si la transacción fue exitosa
+}
+
 export interface IPOSAdapter {
   // Turnos
   openShift(data: ShiftOpenData): Promise<{ shiftId: number; staffName: string }>
@@ -84,4 +103,7 @@ export interface IPOSAdapter {
 
   // ✅ NUEVO: Pago inteligente con manejo de pagos parciales
   applyIntelligentPayment(orderExternalId: string, payment: IntelligentPaymentData): Promise<PaymentResult>
+
+  // ✅ NUEVO: Pago rápido (fast payment) para registro de transacciones directas
+  createFastPayment(data: FastPaymentData): Promise<FastPaymentResult>
 }
