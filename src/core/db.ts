@@ -14,19 +14,34 @@ const connectWithRetry = async (): Promise<void> => {
     const { sqlConfig } = loadConfig() // Obtenemos la config desde un solo lugar
     log.info('🔌 Conectando a SQL Server...')
 
+    // Parse server and port if provided
+    let server = sqlConfig.server
+    let port: number | undefined = undefined
+
+    if (sqlConfig.server.includes(',')) {
+      // If server has comma, parse port (e.g., "100.80.118.68,49759")
+      const parts = sqlConfig.server.split(',')
+      server = parts[0]
+      port = parseInt(parts[1])
+    } else if (sqlConfig.server.includes('.')) {
+      // If server is an IP without port, use default SQL Server port
+      port = 49759 // Use the specific port for the external database
+    }
+
     // Creamos un nuevo objeto de configuración para la librería mssql
     const dbConfig: sql.config = {
       user: sqlConfig.user,
       password: sqlConfig.password,
       database: sqlConfig.database,
-      server: sqlConfig.server,
+      server: server,
+      port: port,
       pool: {
         max: 10,
         min: 0,
         idleTimeoutMillis: 30000,
       },
       options: {
-        instanceName: sqlConfig.instanceName,
+        instanceName: port ? undefined : sqlConfig.instanceName, // Don't use instance name if port is specified
         encrypt: false, // Para desarrollo local. En producción, debería ser true con un certificado válido.
         trustServerCertificate: true, // Necesario para certificados autofirmados en desarrollo
       },

@@ -25,10 +25,12 @@ const debouncedOrders = new Map<string, NodeJS.Timeout>()
 let detectedVersion: number | null = null
 
 interface ChangeNotification {
+  Id: number
   EntityType: string
   EntityId: string
-  LastModifiedAt: Date
-  ChangeReason: string
+  Timestamp: Date
+  Operation: string
+  RetryCount: number
 }
 
 async function sendHeartbeat() {
@@ -111,9 +113,8 @@ async function pollForChanges() {
     const pool = getDbPool()
     const result = await pool
       .request()
-      .input('lastSyncTimestamp', sql.DateTime2, lastSyncTimestamp)
-      .input('maxResults', sql.Int, 100)
-      .execute('sp_GetEntityChanges')
+      .input('MaxResults', sql.Int, 100)
+      .execute('sp_GetPendingChanges')
 
     const changes = result.recordset as ChangeNotification[]
     if (changes.length === 0) return
@@ -123,7 +124,7 @@ async function pollForChanges() {
     // ✅ PASO 1: Detectar los IDs de los turnos cerrados en este lote específico.
     const closedShiftIdsInBatch = new Set<string>()
     for (const change of changes) {
-      if (change.EntityType === 'shift' && change.ChangeReason.includes('updated')) {
+      if (change.EntityType === 'shift' && change.Operation.includes('UPDATE')) {
         // ✅ Validar que change.EntityId sea un número válido
         const numericEntityId = parseInt(change.EntityId)
         if (isNaN(numericEntityId) || !isFinite(numericEntityId)) {
@@ -147,7 +148,15 @@ async function pollForChanges() {
     for (const change of changes) {
       try {
         let result: { payload: object } | null = null
-        const eventType = change.ChangeReason.split('_').pop() || 'updated'
+        // Map CREATE -> created, UPDATE -> updated, DELETE -> deleted, CLOSED -> closed, OPENED -> created
+        const operationMap: { [key: string]: string } = {
+          'CREATE': 'created',
+          'UPDATE': 'updated',
+          'DELETE': 'deleted',
+          'CLOSED': 'closed',
+          'OPENED': 'created'
+        }
+        const eventType = operationMap[change.Operation] || 'updated'
 
         switch (change.EntityType) {
           case 'order':
@@ -205,7 +214,15 @@ async function pollForChanges() {
           case 'shift':
             result = await processShiftChange(change, venueId)
             if (result) {
-              const finalEventType = eventType === 'updated' ? 'closed' : eventType
+              // Use the eventType directly since we now map CLOSED -> closed and OPENED -> created
+              let finalEventType = eventType
+
+              // Only override for 'updated' events if we need to check the actual status
+              if (eventType === 'updated') {
+                // For updated shifts, check if they're actually closed based on the shift data
+                const shiftStatus = (result.payload as any).shiftData.status
+                finalEventType = shiftStatus === 'CLOSED' ? 'closed' : 'updated'
+              }
 
               const routingKey = `pos.${posType}.shift.${finalEventType}`
               await publishMessage(POS_EVENTS_EXCHANGE, routingKey, result.payload)
@@ -218,7 +235,14 @@ async function pollForChanges() {
       }
     }
 
-    lastSyncTimestamp = changes[changes.length - 1].LastModifiedAt
+    // Mark changes as processed
+    const processedIds = changes.map(c => c.Id).join(',')
+    await pool
+      .request()
+      .input('Ids', sql.VarChar(sql.MAX), processedIds)
+      .execute('sp_MarkChangesProcessed')
+
+    lastSyncTimestamp = changes[changes.length - 1].Timestamp
   } catch (error) {
     log.error('[Producer] Error en el ciclo de polling principal.', error)
   }
@@ -334,7 +358,7 @@ async function processOrderChangeV10(change: ChangeNotification, venueId: string
   try {
     const [instanceId, idturno, folio] = parts
 
-    if (change.ChangeReason.includes('deleted')) {
+    if (change.Operation === 'DELETE') {
       return { payload: { venueId, orderData: { externalId: change.EntityId, status: 'CANCELLED' } } }
     }
 
@@ -452,7 +476,7 @@ async function processOrderChangeV11(
   workspaceId: string,
 ): Promise<{ payload: object } | null> {
   try {
-    if (change.ChangeReason.includes('deleted')) {
+    if (change.Operation === 'DELETE') {
       return { payload: { venueId, orderData: { externalId: change.EntityId, status: 'CANCELLED' } } }
     }
 
@@ -602,7 +626,7 @@ async function processOrderItemChangeV10(
     const [instanceId, idturno, folio, movimiento] = parts
     const parentOrderExternalId = `${instanceId}:${idturno}:${folio}`
 
-    if (change.ChangeReason.includes('deleted')) {
+    if (change.Operation === 'DELETE') {
       return { payload: { venueId, parentOrderExternalId, itemData: { externalId: change.EntityId, deleted: true } } }
     }
 
@@ -654,7 +678,7 @@ async function processOrderItemChangeV11(
   try {
     const [workspaceId, sequence] = parts
 
-    if (change.ChangeReason.includes('deleted')) {
+    if (change.Operation === 'DELETE') {
       // For v11, we need to find the parent order by WorkspaceId
       // Since the order item is being deleted, we might not find it in the DB
       // We'll try to find the parent order by the WorkspaceId from the EntityId
@@ -738,7 +762,7 @@ async function processShiftChangeV10(change: ChangeNotification, venueId: string
       return null
     }
 
-    if (change.ChangeReason.includes('deleted')) {
+    if (change.Operation === 'DELETE') {
       // Para deletes, necesitamos buscar el WorkspaceId antes de que se elimine
       const pool = getDbPool()
       const shiftRes = await pool
@@ -782,7 +806,7 @@ async function processShiftChangeV11(
   workspaceId: string,
 ): Promise<{ payload: object } | null> {
   try {
-    if (change.ChangeReason.includes('deleted')) {
+    if (change.Operation === 'DELETE') {
       // For v11 deletes, EntityId is already the WorkspaceId
       return { payload: { venueId, shiftData: { externalId: workspaceId, status: 'DELETED' } } }
     }

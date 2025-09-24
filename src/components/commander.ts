@@ -1,7 +1,7 @@
 import { ConsumeMessage } from 'amqplib'
 import { log } from '../core/logger'
 import { getRabbitMQChannel } from '../core/rabbitmq'
-import { IPOSAdapter, OrderCreateData, OrderAddItemData, IntelligentPaymentData } from '../adapters/IPosAdapter'
+import { IPOSAdapter, OrderCreateData, OrderAddItemData, IntelligentPaymentData, ShiftOpenData, ShiftCloseData } from '../adapters/IPosAdapter'
 import { SoftRestaurant11Adapter } from '../adapters/SoftRestaurant11Adapter'
 import { loadConfig } from '../config'
 
@@ -58,6 +58,32 @@ const handleCommand = async (msg: ConsumeMessage | null) => {
         } else {
           log.info(`[Comandante] 💰 Pago parcial aplicado a orden ${orderExternalId}. Pagado: ${paymentResult.totalPaid}, Restante: ${paymentResult.remaining}`)
         }
+        break
+
+      case 'Shift.OPEN':
+        // Handle shift opening
+        const shiftOpenData = payload as ShiftOpenData
+        if (!shiftOpenData.posStaffId) {
+          throw new Error("El payload para 'Shift.OPEN' debe incluir 'posStaffId'.")
+        }
+
+        log.info(`[Comandante] Abriendo turno para cajero ${shiftOpenData.posStaffId}`)
+        const openResult = await adapter.openShift(shiftOpenData)
+
+        log.info(`[Comandante] ✅ Turno abierto exitosamente. ID: ${openResult.shiftId}, Cajero: ${openResult.staffName}`)
+        break
+
+      case 'Shift.CLOSE':
+        // Handle shift closing
+        const shiftCloseData = payload as ShiftCloseData
+        if (!shiftCloseData.shiftId) {
+          throw new Error("El payload para 'Shift.CLOSE' debe incluir 'shiftId'.")
+        }
+
+        log.info(`[Comandante] Cerrando turno ${shiftCloseData.shiftId}`)
+        await adapter.closeShift(shiftCloseData.shiftId, shiftCloseData)
+
+        log.info(`[Comandante] ✅ Turno ${shiftCloseData.shiftId} cerrado exitosamente`)
         break
 
       default:

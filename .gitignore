@@ -11,6 +11,7 @@ syncState.json
 
 
 # Archivos de entorno
+
 .env
 
 # Archivos del sistema operativo
@@ -19,3 +20,6 @@ Thumbs.db
 
 # Archivo del empaquetador
 /AvoqadoSyncService.exe
+
+
+.claude/settings.local.json

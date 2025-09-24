@@ -222,7 +222,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * RECETA #5: Abre un nuevo turno en el POS.
    */
-  async openShift(data: ShiftOpenData): Promise<{ shiftId: number }> {
+  async openShift(data: ShiftOpenData): Promise<{ shiftId: number; staffName: string }> {
     log.info(`[Adapter SR11] Abriendo nuevo turno para el cajero ${data.posStaffId}...`)
     const pool = getDbPool()
     const transaction = new sql.Transaction(pool)
@@ -233,14 +233,25 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       const idResult = await new sql.Request(transaction).query('SELECT ISNULL(MAX(idturno), 0) + 1 as nextId FROM turnos')
       const nextShiftId = idResult.recordset[0].nextId
 
+      // Look up staff name if available
+      let staffName = data.posStaffId // Default to ID if name not found
+      const staffResult = await new sql.Request(transaction)
+        .input('idmesero', sql.VarChar, data.posStaffId)
+        .query('SELECT nombre FROM meseros WHERE idmesero = @idmesero')
+
+      if (staffResult.recordset.length > 0) {
+        staffName = staffResult.recordset[0].nombre
+      }
+
       const insertQuery = `
-        INSERT INTO turnos (idturno, fondo, apertura, idestacion, cajero, idempresa, idmesero, WorkspaceId) 
-        VALUES (@idturno, @fondo, GETDATE(), 'AVOQADO_SYNC', @cajero, '1', '', NEWID())
+        INSERT INTO turnos (idturno, fondo, apertura, idestacion, cajero, idempresa, idmesero, WorkspaceId)
+        VALUES (@idturno, @fondo, GETDATE(), @idestacion, @cajero, '1', '', NEWID())
       `
       await new sql.Request(transaction)
         .input('idturno', sql.Int, nextShiftId)
         .input('fondo', sql.Money, data.startingCash)
         .input('cajero', sql.VarChar, data.posStaffId)
+        .input('idestacion', sql.VarChar, data.stationId || 'AVOQADO_SYNC')
         .query(insertQuery)
 
       await new sql.Request(transaction)
@@ -248,8 +259,8 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .query('UPDATE parametros SET ultimoturno = @nextShiftId')
 
       await transaction.commit()
-      log.info(`[Adapter SR11] Turno ${nextShiftId} abierto exitosamente.`)
-      return { shiftId: nextShiftId }
+      log.info(`[Adapter SR11] Turno ${nextShiftId} abierto exitosamente para ${staffName}.`)
+      return { shiftId: nextShiftId, staffName: staffName }
     } catch (err: any) {
       log.error('[Adapter SR11] Error en transacción de abrir turno, haciendo ROLLBACK...', err.message)
       await transaction.rollback()
@@ -260,13 +271,17 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * RECETA #6: Cierra un turno existente y archiva toda su data.
    */
-  async closeShift(shiftId: number, data: ShiftCloseData): Promise<void> {
-    log.info(`[Adapter SR11] Iniciando proceso de cierre para el turno ${shiftId}...`)
+  async closeShift(shiftId: string, data: ShiftCloseData): Promise<void> {
+    const shiftIdNum = parseInt(shiftId)
+    if (isNaN(shiftIdNum)) {
+      throw new Error(`Invalid shift ID: ${shiftId}`)
+    }
+    log.info(`[Adapter SR11] Iniciando proceso de cierre para el turno ${shiftIdNum}...`)
     const pool = getDbPool()
     const transaction = new sql.Transaction(pool)
     try {
       await transaction.begin()
-      log.info(`[Adapter SR11] Paso 1: Archivando datos del turno ${shiftId}...`)
+      log.info(`[Adapter SR11] Paso 1: Archivando datos del turno ${shiftIdNum}...`)
 
       // --- PROCESO DE ARCHIVADO: Mover datos de tablas 'temp' a tablas permanentes ---
       // Usamos el `idturno_cierre` para marcar a qué cierre pertenecen estos registros.
@@ -279,43 +294,44 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       ]
 
       for (const query of archivalQueries) {
-        await new sql.Request(transaction).input('shiftId', sql.Int, shiftId).query(query)
+        await new sql.Request(transaction).input('shiftId', sql.Int, shiftIdNum).query(query)
       }
       log.info(`[Adapter SR11] Paso 2: Limpiando tablas temporales...`)
 
       // --- PROCESO DE LIMPIEZA ---
       const folioSubquery = `SELECT folio FROM tempcheques WHERE idturno = @shiftId`
       await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftId)
+        .input('shiftId', sql.Int, shiftIdNum)
         .query(`DELETE FROM mesasasignadas WHERE folio IN (${folioSubquery})`)
       await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftId)
+        .input('shiftId', sql.Int, shiftIdNum)
         .query(`DELETE FROM tempchequespagos WHERE folio IN (${folioSubquery})`)
       await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftId)
+        .input('shiftId', sql.Int, shiftIdNum)
         .query(`DELETE FROM tempcheqdet WHERE foliodet IN (${folioSubquery})`)
       await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftId)
+        .input('shiftId', sql.Int, shiftIdNum)
         .query(`DELETE FROM tempcancela WHERE foliocheque IN (${folioSubquery})`)
-      await new sql.Request(transaction).input('shiftId', sql.Int, shiftId).query(`DELETE FROM tempcheques WHERE idturno = @shiftId`)
+      await new sql.Request(transaction).input('shiftId', sql.Int, shiftIdNum).query(`DELETE FROM tempcheques WHERE idturno = @shiftId`)
 
       log.info(`[Adapter SR11] Paso 3: Cerrando el registro del turno...`)
 
       // --- PROCESO DE CIERRE FINAL ---
       await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftId)
+        .input('shiftId', sql.Int, shiftIdNum)
         .input('cierre', sql.DateTime, new Date())
         .input('efectivo', sql.Money, data.cashDeclared)
         .input('tarjeta', sql.Money, data.cardDeclared)
         .input('vales', sql.Money, data.vouchersDeclared)
+        .input('otros', sql.Money, data.otherDeclared || 0)
         .query('UPDATE turnos SET cierre=@cierre, efectivo=@efectivo, tarjeta=@tarjeta, vales=@vales WHERE idturno=@shiftId')
 
       await new sql.Request(transaction).query("UPDATE folios SET ultimaorden=0, ultimofolioproduccion=0 WHERE serie=''")
 
       await transaction.commit()
-      log.info(`[Adapter SR11] COMMIT exitoso. Turno ${shiftId} cerrado y archivado.`)
+      log.info(`[Adapter SR11] COMMIT exitoso. Turno ${shiftIdNum} cerrado y archivado.`)
     } catch (err: any) {
-      log.error(`[Adapter SR11] Error en transacción de cerrar turno, haciendo ROLLBACK...`, err.message)
+      log.error(`[Adapter SR11] Error en transacción de cerrar turno ${shiftIdNum}, haciendo ROLLBACK...`, err.message)
       await transaction.rollback()
       throw err
     }
@@ -326,101 +342,115 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   // =================================================================
 
   /**
-   * ✅ NUEVO: Aplica un pago usando el mecanismo nativo de división de cuenta
-   * Esto garantiza que el POS siempre muestre el saldo correcto para sincronización bidireccional
+   * SIMPLIFIED: Apply payment using new stored procedure
    */
   async applyIntelligentPayment(orderExternalId: string, payment: IntelligentPaymentData): Promise<PaymentResult> {
-    log.info(`[Adapter SR11] Aplicando pago con split check para orden ${orderExternalId}, monto: ${payment.amount}`)
+    log.info(`[Adapter SR11] 💳 Applying payment to order ${orderExternalId}, amount: ${payment.amount}`)
 
     const pool = getDbPool()
-    const transaction = new sql.Transaction(pool)
 
     try {
-      await transaction.begin()
-
-      // PASO 1: Obtener el folio desde el orderExternalId
-      const folio = await this.resolveOrderFolio(orderExternalId, transaction)
+      // Get folio from external ID
+      const folio = await this.extractFolioFromExternalId(orderExternalId)
       if (!folio) {
-        throw new Error(`No se pudo encontrar la orden con ID externo: ${orderExternalId}`)
+        throw new Error(`Could not resolve folio from external ID: ${orderExternalId}`)
       }
 
-      // PASO 2: Obtener datos de la orden
-      const orderData = await this.getOrderData(folio, transaction)
-      if (!orderData) {
-        throw new Error(`No se encontraron datos para el folio: ${folio}`)
+      log.info(`[Adapter SR11] Resolved folio ${folio} from external ID ${orderExternalId}`)
+
+      // Call the new stored procedure
+      const result = await pool.request()
+        .input('Folio', sql.BigInt, folio)
+        .input('PaymentAmount', sql.Money, payment.amount)
+        .input('TipAmount', sql.Money, payment.tip || 0)
+        .input('PaymentMethod', sql.VarChar(50), payment.posPaymentMethodId)
+        .input('Reference', sql.VarChar(255), payment.reference || null)
+        .output('Success', sql.Bit)
+        .output('Message', sql.NVarChar(500))
+        .output('Remaining', sql.Money)
+        .execute('sp_ApplyPartialPayment')
+
+      const success = result.output.Success
+      const message = result.output.Message
+      const remaining = result.output.Remaining || 0
+
+      if (!success) {
+        throw new Error(`Payment failed: ${message}`)
       }
 
-      // PASO 3: Verificar que la orden no esté ya pagada
-      if (orderData.pagado) {
-        throw new Error(`La orden ${folio} ya está pagada completamente`)
-      }
+      log.info(`[Adapter SR11] ✅ ${message}`)
 
-      // PASO 4: Calcular pagos existentes
-      const existingPayments = await this.getExistingPayments(folio, transaction)
-      const totalAfterPayment = existingPayments + payment.amount
+      // Determine if order is closed
+      const isClosed = remaining <= 0.01  // Allow for small rounding differences
 
-      log.info(`[Adapter SR11] Estado de pago - Orden: ${orderData.total}, Ya pagado: ${existingPayments}, Nuevo pago: ${payment.amount}, Total después: ${totalAfterPayment}`)
-
-      // PASO 5: Determinar si la orden está completamente pagada
-      if (totalAfterPayment >= orderData.total) {
-        // PAGO COMPLETO - Aplicar pago directamente y cerrar
-        const change = totalAfterPayment - orderData.total
-        await this.insertPaymentToPOS(folio, payment, transaction)
-        await this.markOrderAsPaid(folio, transaction)
-
-        await transaction.commit()
-        log.info(`[Adapter SR11] ✅ Orden ${folio} pagada completamente. Cambio: ${change}`)
-
+      if (isClosed) {
+        log.info(`[Adapter SR11] ✅ Order ${folio} fully paid`)
         return {
           closed: true,
-          change: change > 0 ? change : undefined,
-          totalPaid: totalAfterPayment
+          change: remaining < 0 ? Math.abs(remaining) : undefined,
+          totalPaid: payment.amount
         }
       } else {
-        // PAGO PARCIAL - Solo rastrear el pago SIN modificar cantidades ni totales
-        log.info(`[Adapter SR11] 💰 Registrando pago parcial de ${payment.amount} sin modificar orden`)
-
-        // Solo registrar el pago para auditoría y observaciones
-        await this.trackPartialPayment(folio, payment.amount, payment, transaction)
-
-        // Calcular el restante basado en el total original menos todos los pagos
-        const remaining = orderData.total - (existingPayments + payment.amount)
-
-        await transaction.commit()
-        log.info(`[Adapter SR11] 💰 Pago parcial registrado. Total orden: ${orderData.total}, Total pagado: ${existingPayments + payment.amount}, Restante: ${remaining}`)
-
+        log.info(`[Adapter SR11] 💰 Partial payment applied. Remaining: $${remaining}`)
         return {
           closed: false,
           remaining: remaining,
-          totalPaid: existingPayments + payment.amount
+          totalPaid: payment.amount
         }
       }
 
     } catch (err: any) {
-      log.error(`[Adapter SR11] Error en pago inteligente, haciendo ROLLBACK...`, err.message)
-      try {
-        await transaction.rollback()
-      } catch (rollbackErr: any) {
-        log.error('[Adapter SR11] Error en ROLLBACK de pago inteligente', rollbackErr.message)
-      }
+      log.error(`[Adapter SR11] Payment error:`, err.message)
       throw err
     }
   }
 
   /**
-   * Resuelve el folio de una orden desde su ID externo
+   * Helper: Extract folio from external ID (handles different formats)
    */
-  private async resolveOrderFolio(orderExternalId: string, transaction: sql.Transaction): Promise<number | null> {
+  private async extractFolioFromExternalId(orderExternalId: string): Promise<number | null> {
     const parts = orderExternalId.split(':')
 
-    // Manejar diferentes formatos de Entity ID basado en versión detectada
+    // Handle different Entity ID formats
+    if (parts.length === 3) {
+      // v10 format: INSTANCE:TURNO:FOLIO
+      return parseInt(parts[2])
+    } else if (parts.length === 1) {
+      // v11 format: WorkspaceId only, need to query
+      const pool = getDbPool()
+      const result = await pool.request()
+        .input('workspaceId', sql.UniqueIdentifier, orderExternalId)
+        .query('SELECT TOP 1 folio FROM tempcheques WHERE WorkspaceId = @workspaceId')
+
+      return result.recordset[0]?.folio || null
+    } else {
+      // Try parsing as direct folio
+      const folioNum = parseInt(orderExternalId)
+      return isNaN(folioNum) ? null : folioNum
+    }
+  }
+
+  /**
+   * DEPRECATED: Use extractFolioFromExternalId instead
+   */
+  private async resolveOrderFolio(orderExternalId: string, transaction: sql.Transaction): Promise<number | null> {
+    // Redirect to new method
+    return this.extractFolioFromExternalId(orderExternalId)
+  }
+
+  /**
+   * DEPRECATED: Old method kept for compatibility
+   */
+  private async extractFolioFromOrderId(orderExternalId: string): Promise<number | null> {
+    const parts = orderExternalId.split(':')
     if (parts.length === 3) {
       // Formato v10: INSTANCE:TURNO:FOLIO
       const folio = parseInt(parts[2])
       return isNaN(folio) ? null : folio
     } else if (parts.length === 1) {
       // Formato v11: WorkspaceId
-      const result = await new sql.Request(transaction)
+      const pool = await getDbPool()
+      const result = await pool.request()
         .input('workspaceId', sql.UniqueIdentifier, orderExternalId)
         .query('SELECT folio FROM tempcheques WHERE WorkspaceId = @workspaceId')
 

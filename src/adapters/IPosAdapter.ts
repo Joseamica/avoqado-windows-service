@@ -15,12 +15,16 @@ export interface ShiftPayload {
 export interface ShiftOpenData {
   posStaffId: string
   startingCash: number
+  stationId?: string
 }
 
 export interface ShiftCloseData {
+  shiftId?: string // The shift ID to close
   cashDeclared: number
   cardDeclared: number
   vouchersDeclared: number
+  otherDeclared?: number
+  notes?: string
   // ... cualquier otro total que el POS necesite para el cierre.
 }
 
@@ -66,8 +70,8 @@ export interface ProductCreateData {
 }
 export interface IPOSAdapter {
   // Turnos
-  openShift(data: ShiftOpenData): Promise<{ shiftId: number }>
-  closeShift(shiftId: number, data: ShiftCloseData): Promise<void>
+  openShift(data: ShiftOpenData): Promise<{ shiftId: number; staffName: string }>
+  closeShift(shiftId: string, data: ShiftCloseData): Promise<void>
 
   // Órdenes
   createEmptyOrder(data: OrderCreateData): Promise<{ folio: number }>
