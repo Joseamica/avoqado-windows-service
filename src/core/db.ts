@@ -19,14 +19,12 @@ const connectWithRetry = async (): Promise<void> => {
     let port: number | undefined = undefined
 
     if (sqlConfig.server.includes(',')) {
-      // If server has comma, parse port (e.g., "100.80.118.68,49759")
+      // If server has comma, parse port explicitly (e.g., "100.80.118.68,49759")
       const parts = sqlConfig.server.split(',')
       server = parts[0]
       port = parseInt(parts[1])
-    } else if (sqlConfig.server.includes('.')) {
-      // If server is an IP without port, use default SQL Server port
-      port = 49759 // Use the specific port for the external database
     }
+    // No else - let SQL Server use its default connection method (named instance or default port)
 
     // Creamos un nuevo objeto de configuración para la librería mssql
     const dbConfig: sql.config = {

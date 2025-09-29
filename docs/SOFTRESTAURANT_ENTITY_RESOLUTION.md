@@ -46,7 +46,7 @@ if (eventType === 'deleted') {
 
 ### Part 2: Smart Entity Resolution in Backend
 
-**File**: `backend/src/services/pos-sync/posSyncOrder.service.ts`
+**File**: `avoqado-server/src/services/pos-sync/posSyncOrder.service.ts`
 
 Added intelligent order resolution that handles the idturno=0 → real idturno transition:
 

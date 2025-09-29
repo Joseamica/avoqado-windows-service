@@ -687,7 +687,7 @@ async function processOrderItemChangeV11(
 
     const pool = getDbPool()
 
-    // In v11, we need to find the item by WorkspaceId and sequence
+    // In v11, we need to find the item by order WorkspaceId and sequence
     const itemRes = await pool
       .request()
       .input('workspaceId', sql.UniqueIdentifier, workspaceId)
@@ -696,8 +696,8 @@ async function processOrderItemChangeV11(
         `SELECT td.*, p.descripcion as nombreproducto, tc.WorkspaceId as orderWorkspaceId
          FROM tempcheqdet td
          LEFT JOIN productos p ON td.idproducto = p.idproducto
-         LEFT JOIN tempcheques tc ON td.foliodet = tc.folio
-         WHERE td.WorkspaceId = @workspaceId AND td.movimiento = @movimiento`,
+         INNER JOIN tempcheques tc ON td.foliodet = tc.folio
+         WHERE tc.WorkspaceId = @workspaceId AND td.movimiento = @movimiento`,
       )
 
     if (!itemRes.recordset[0]) {

@@ -18,7 +18,9 @@
 - **Instance**: NATIONALSOFT
 - **Database**: avov2
 - **Authentication**: SQL Server Auth (sa/National09)
-- **Multi-tenant**: Yes (1000+ active WorkspaceIds)
+- **Multi-tenant**: Yes (6 active WorkspaceIds in test database)
+
+**NOTE**: This guide is based on the test database. Production databases may have different tenant counts and folio numbers.
 
 ---
 
@@ -28,7 +30,7 @@
 SoftRestaurant v11 uses `WorkspaceId` (UUID) for complete tenant isolation.
 
 #### Key Facts:
-- **1000+ active tenants** in the current database
+- **6 active tenants** in the current test database (100.80.118.68:49759)
 - Each tenant has a unique GUID WorkspaceId
 - WorkspaceId is present in most transactional tables
 - Ensures data isolation between different restaurant clients
@@ -96,7 +98,7 @@ Stores all sales transactions (despite the name "cheques").
 ### Characteristics:
 - Independent sequential numbering from invoices
 - No mandatory series prefix
-- Current maximum folio: 24481
+- Current maximum folio: 24483 (as of Sept 2025)
 - Can be converted to invoices later
 
 ---
