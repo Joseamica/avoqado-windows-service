@@ -10,7 +10,9 @@
     "svc:install": "npm run build && node dist/main.js install",
     "svc:uninstall": "node dist/main.js uninstall",
     "format": "prettier --write \"src/**/*.ts\"",
-    "check-format": "prettier --check \"src/**/*.ts\""
+    "check-format": "prettier --check \"src/**/*.ts\"",
+    "monitor": "node monitor-sql.js",
+    "monitor:build": "tsc src/tools/sqlMonitor.ts --outDir dist/tools && node dist/tools/sqlMonitor.js"
   },
   "dependencies": {
     "amqplib": "^0.10.3",

@@ -47,6 +47,10 @@ This includes but is not limited to:
 - `npm run format` - Format code with Prettier
 - `npm run check-format` - Check code formatting
 
+### SQL Monitoring & Profiling (IMPORTANT FOR CLAUDE)
+
+- `npm run monitor` - Start real-time SQL Server query monitoring for the POS database
+
 ### Windows Service Management (requires admin privileges)
 
 - `npm run svc:install` - Install as Windows service
@@ -55,6 +59,86 @@ This includes but is not limited to:
 ### Packaging
 
 - `npm run package` - Build and create AvoqadoSyncService.exe
+
+### 🔍 SQL Server Real-Time Monitoring (CRITICAL FOR CLAUDE)
+
+**IMPORTANT: Whenever analyzing POS behavior or debugging database issues, ALWAYS run the SQL monitor first to see what queries the POS is executing.**
+
+#### Starting the Monitor
+
+```bash
+# Start monitoring (run this FIRST before any POS testing)
+npm run monitor
+```
+
+This connects to the remote SQL Server and shows:
+- **Real-time queries** as they execute
+- **Query statistics** (execution count, CPU time, duration)
+- **Active connections** and their operations
+- **Recent query history** with performance metrics
+
+#### Monitor Configuration
+
+The monitor automatically connects to:
+- **Server**: `100.80.118.68:49759`
+- **Database**: `avov2`
+- **Credentials**: Already configured in the tool
+
+#### What Claude Can See
+
+When the monitor is running, Claude can observe:
+
+1. **Order Creation**: `INSERT INTO tempcheques` with all fields
+2. **Adding Items**: `INSERT INTO tempcheqdet` for each product
+3. **Order Updates**: `UPDATE tempcheques` for modifications
+4. **Printing Bills**: `UPDATE tempcheques SET impreso=1`
+5. **Payments**: `INSERT INTO tempchequespagos` and `UPDATE tempcheques SET pagado=1`
+6. **Shift Operations**: `INSERT/UPDATE turnos` for shift open/close
+7. **Trigger Executions**: `Trg_Avoqado_*` triggers firing
+8. **Stored Procedures**: `sp_GetPendingChanges` polling
+9. **Transaction Patterns**: BEGIN TRAN, COMMIT, ROLLBACK sequences
+
+#### Usage Workflow for Claude
+
+1. **Before any POS testing**:
+   ```bash
+   npm run monitor  # Start this FIRST
+   ```
+
+2. **In another terminal**:
+   ```bash
+   npm run dev     # Start the Windows service
+   ```
+
+3. **Observe the monitor output** to see:
+   - What queries the POS executes
+   - How triggers respond
+   - Performance bottlenecks
+   - Transaction patterns
+
+#### Monitor Output Format
+
+```
+🔍 SQL SERVER QUERY MONITOR
+⏰ 1:47:25 p.m.
+=====================================
+✨ Active queries show here in real-time
+
+📈 Recent Query Statistics:
+=====================================
+1. [Time] Exec:391 CPU:179ms
+   SELECT TOP (@MaxResults) Id, EntityType...
+```
+
+#### Critical Use Cases
+
+- **Debugging Integration**: See exactly what SQL the POS runs
+- **Performance Analysis**: Identify slow queries and bottlenecks
+- **Trigger Validation**: Verify Avoqado triggers are firing correctly
+- **Transaction Monitoring**: Watch shift close sequences
+- **Error Investigation**: Catch failed queries and deadlocks
+
+**NOTE**: The monitor updates every 2 seconds. Press `Ctrl+C` to stop.
 
 ### Database Access & Debugging
 

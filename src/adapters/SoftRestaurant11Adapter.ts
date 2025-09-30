@@ -420,23 +420,39 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    * Helper: Extract folio from external ID (handles different formats)
    */
   private async extractFolioFromExternalId(orderExternalId: string): Promise<number | null> {
+    log.info(`[Adapter SR11] 🔍 extractFolioFromExternalId called with: ${orderExternalId}`)
     const parts = orderExternalId.split(':')
+    log.info(`[Adapter SR11] 🔍 Split into ${parts.length} parts`)
 
     // Handle different Entity ID formats
     if (parts.length === 3) {
       // v10 format: INSTANCE:TURNO:FOLIO
-      return parseInt(parts[2])
+      const folio = parseInt(parts[2])
+      log.info(`[Adapter SR11] 🔍 v10 format detected, returning folio: ${folio}`)
+      return folio
     } else if (parts.length === 1) {
       // v11 format: WorkspaceId only, need to query
+      log.info(`[Adapter SR11] 🔍 v11 format detected, querying database for WorkspaceId: ${orderExternalId}`)
       const pool = getDbPool()
+      const query = 'SELECT TOP 1 folio FROM tempcheques WHERE WorkspaceId = @workspaceId ORDER BY folio DESC'
+      log.info(`[Adapter SR11] 🔍 Executing query: ${query}`)
+
       const result = await pool.request()
         .input('workspaceId', sql.UniqueIdentifier, orderExternalId)
-        .query('SELECT TOP 1 folio FROM tempcheques WHERE WorkspaceId = @workspaceId')
+        .query(query)
+
+      log.info(`[Adapter SR11] 🔍 Query returned ${result.recordset.length} results`)
+      if (result.recordset.length > 0) {
+        log.info(`[Adapter SR11] 🔍 Result folio: ${result.recordset[0].folio}`)
+      } else {
+        log.info(`[Adapter SR11] 🔍 No results found, returning null`)
+      }
 
       return result.recordset[0]?.folio || null
     } else {
       // Try parsing as direct folio
       const folioNum = parseInt(orderExternalId)
+      log.info(`[Adapter SR11] 🔍 Parsing as direct folio: ${folioNum}`)
       return isNaN(folioNum) ? null : folioNum
     }
   }

@@ -5,10 +5,28 @@ import { log } from './logger'
 // Esta variable mantendrá la conexión viva
 let pool: ConnectionPool | null = null
 let isConnecting = false
+let retryCount = 0
+const MAX_RETRIES = 5
+const RETRY_BASE_DELAY = 1000 // 1 second base delay
 
 const connectWithRetry = async (): Promise<void> => {
-  if (pool || isConnecting) return
+  if (pool) return
+  if (isConnecting) {
+    // Wait for current connection attempt to finish
+    while (isConnecting && !pool) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    return
+  }
+
+  if (retryCount >= MAX_RETRIES) {
+    const error = new Error(`SQL Server connection failed after ${MAX_RETRIES} attempts`)
+    log.error('🔥 Maximum connection retry attempts reached:', error.message)
+    throw error
+  }
+
   isConnecting = true
+  retryCount++
 
   try {
     const { sqlConfig } = loadConfig() // Obtenemos la config desde un solo lugar
@@ -40,27 +58,42 @@ const connectWithRetry = async (): Promise<void> => {
       },
       options: {
         instanceName: port ? undefined : sqlConfig.instanceName, // Don't use instance name if port is specified
-        encrypt: false, // Para desarrollo local. En producción, debería ser true con un certificado válido.
-        trustServerCertificate: true, // Necesario para certificados autofirmados en desarrollo
+        encrypt: process.env.NODE_ENV === 'production' ? true : false, // Enable encryption in production
+        trustServerCertificate: process.env.NODE_ENV === 'production' ? false : true, // Don't trust self-signed certs in production
+        enableArithAbort: true, // Required for SQL Server 2014 compatibility
+        abortTransactionOnError: true, // Abort transaction on error
       },
     }
 
     pool = await new ConnectionPool(dbConfig).connect()
+    retryCount = 0 // Reset retry count on successful connection
     log.info('✅ Conexión con SQL Server establecida.')
 
     pool.on('error', err => {
       log.error('❌ Error en el pool de SQL Server:', err)
+      // Reset pool to allow reconnection on pool errors
+      pool = null
+      isConnecting = false
     })
   } catch (error: any) {
-    log.error('🔥 Falla catastrófica al conectar con SQL Server, reintentando en 10s...', error.message)
+    log.error(`🔥 SQL Server connection failed (attempt ${retryCount}/${MAX_RETRIES}):`, error.message)
     pool = null
     isConnecting = false
 
-    // Wait 10 seconds and retry, but throw the error to prevent continuation
-    await new Promise(resolve => setTimeout(resolve, 10000))
-    return await connectWithRetry()
+    if (retryCount < MAX_RETRIES) {
+      // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+      const delay = RETRY_BASE_DELAY * Math.pow(2, retryCount - 1)
+      log.info(`🔄 Retrying connection in ${delay}ms...`)
+      await new Promise(resolve => setTimeout(resolve, delay))
+      return await connectWithRetry()
+    } else {
+      // Max retries reached, throw the error
+      throw new Error(`SQL Server connection failed after ${MAX_RETRIES} attempts: ${error.message}`)
+    }
   } finally {
-    isConnecting = false
+    if (retryCount >= MAX_RETRIES || pool) {
+      isConnecting = false
+    }
   }
 }
 
@@ -111,7 +144,14 @@ export const executeTransaction = async <T>(action: (transaction: Transaction) =
 export const closeDbPool = async (): Promise<void> => {
   if (pool) {
     log.info('🚪 Cerrando pool de SQL Server...')
-    await pool.close()
-    pool = null
+    try {
+      await pool.close()
+    } catch (error) {
+      log.error('Error closing SQL Server pool:', error)
+    } finally {
+      pool = null
+      isConnecting = false
+      retryCount = 0 // Reset retry count when closing
+    }
   }
 }
