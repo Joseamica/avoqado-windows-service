@@ -38,11 +38,12 @@ async function startApp() {
     log.info('✅ Producer iniciado')
 
     // Iniciar consola de administración en modo interactivo
-    if (process.env.NODE_ENV !== 'production') {
-      setTimeout(() => {
-        managementConsole.start()
-      }, 2000) // Dar tiempo para que se inicialicen todos los componentes
-    }
+    // DISABLED: Console causes crashes in background mode
+    // if (process.env.NODE_ENV !== 'production') {
+    //   setTimeout(() => {
+    //     managementConsole.start()
+    //   }, 2000) // Dar tiempo para que se inicialicen todos los componentes
+    // }
 
     log.info('🎉 Servicio de Sincronización Avoqado corriendo exitosamente.')
     log.info('📊 Estado inicial:', serviceStateManager.getCurrentState())

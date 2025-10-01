@@ -34,6 +34,41 @@ This includes but is not limited to:
 
 **Testing Requirement**: Every change must be verified against both v10 and v11 test databases before deployment.
 
+## 🚨 CRITICAL SQL SCRIPT SYNCHRONIZATION RULE
+
+**MANDATORY: When making ANY changes to SQL scripts, you MUST update ALL related scripts:**
+
+1. **Main Installation**: `scripts/sql/01-COMPLETE-INSTALL.sql`
+2. **Cleanup**: `scripts/sql/00-CLEANUP-ALL.sql` (add removal logic)
+3. **Verification**: `scripts/sql/00-VERIFICATION.sql` (add existence checks)
+4. **Testing**: `scripts/sql/02-TESTING.sql` (add functional tests)
+5. **Diagnostics**: `scripts/sql/03-DIAGNOSTICS.sql` (add monitoring checks)
+
+**Examples of changes requiring updates across all scripts:**
+- Adding/removing payment methods (ACASH, ACARD)
+- Adding/removing test products (AVOTEST)
+- Adding/removing stored procedures
+- Adding/removing triggers
+- Adding/removing tables
+- Changing table structures (ProcessedAt vs Processed)
+- Adding/removing functions
+
+**Process:**
+1. Make change in installation script (`01-COMPLETE-INSTALL.sql`)
+2. Add cleanup logic in `00-CLEANUP-ALL.sql`
+3. Add verification check in `00-VERIFICATION.sql`
+4. Add test in `02-TESTING.sql`
+5. Add diagnostic monitoring in `03-DIAGNOSTICS.sql`
+
+**Why this is critical:**
+- Installation scripts create objects → other scripts must verify/test them
+- Cleanup scripts must remove what installation creates
+- Verification ensures installation worked correctly
+- Testing validates functionality
+- Diagnostics monitors health in production
+
+**NO EXCEPTIONS**: This synchronization is NOT optional. All 5 scripts must stay in sync.
+
 ## Common Commands
 
 ### Development & Build

@@ -25,3 +25,4 @@ Thumbs.db
 # Local Claude config
 .claude/settings.local.json
 
+.sqlcred
