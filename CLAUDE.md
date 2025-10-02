@@ -22,6 +22,7 @@ data consistency.
 **🚨 HIGHLY IMPORTANT: ALL modifications, fixes, features, and changes MUST work with BOTH SoftRestaurant v10 AND v11 systems.**
 
 This includes but is not limited to:
+
 - **Database schema changes**: Must handle presence/absence of WorkspaceId columns
 - **Entity ID generation**: Must support both v10 format (`{InstanceId}:{IdTurno}:{Folio}`) and v11 format (`{WorkspaceId}`)
 - **Stored procedures and triggers**: Must be compatible with both versions' table structures
@@ -45,6 +46,7 @@ This includes but is not limited to:
 5. **Diagnostics**: `scripts/sql/03-DIAGNOSTICS.sql` (add monitoring checks)
 
 **Examples of changes requiring updates across all scripts:**
+
 - Adding/removing payment methods (ACASH, ACARD)
 - Adding/removing test products (AVOTEST)
 - Adding/removing stored procedures
@@ -54,6 +56,7 @@ This includes but is not limited to:
 - Adding/removing functions
 
 **Process:**
+
 1. Make change in installation script (`01-COMPLETE-INSTALL.sql`)
 2. Add cleanup logic in `00-CLEANUP-ALL.sql`
 3. Add verification check in `00-VERIFICATION.sql`
@@ -61,6 +64,7 @@ This includes but is not limited to:
 5. Add diagnostic monitoring in `03-DIAGNOSTICS.sql`
 
 **Why this is critical:**
+
 - Installation scripts create objects → other scripts must verify/test them
 - Cleanup scripts must remove what installation creates
 - Verification ensures installation worked correctly
@@ -97,7 +101,8 @@ This includes but is not limited to:
 
 ### 🔍 SQL Server Real-Time Monitoring (CRITICAL FOR CLAUDE)
 
-**IMPORTANT: Whenever analyzing POS behavior or debugging database issues, ALWAYS run the SQL monitor first to see what queries the POS is executing.**
+**IMPORTANT: Whenever analyzing POS behavior or debugging database issues, ALWAYS run the SQL monitor first to see what queries the POS is
+executing.**
 
 #### Starting the Monitor
 
@@ -107,6 +112,7 @@ npm run monitor
 ```
 
 This connects to the remote SQL Server and shows:
+
 - **Real-time queries** as they execute
 - **Query statistics** (execution count, CPU time, duration)
 - **Active connections** and their operations
@@ -115,6 +121,7 @@ This connects to the remote SQL Server and shows:
 #### Monitor Configuration
 
 The monitor automatically connects to:
+
 - **Server**: `100.80.118.68:49759`
 - **Database**: `avov2`
 - **Credentials**: Already configured in the tool
@@ -136,11 +143,13 @@ When the monitor is running, Claude can observe:
 #### Usage Workflow for Claude
 
 1. **Before any POS testing**:
+
    ```bash
    npm run monitor  # Start this FIRST
    ```
 
 2. **In another terminal**:
+
    ```bash
    npm run dev     # Start the Windows service
    ```
@@ -178,17 +187,49 @@ When the monitor is running, Claude can observe:
 ### Database Access & Debugging
 
 **IMPORTANT Database Connection Strategy:**
+
 - **PRODUCTION**: Always uses `localhost\NATIONALSOFT` (instance name, no port)
   - Configuration: `DB_SERVER=localhost`, `DB_INSTANCE=NATIONALSOFT`
 - **DEVELOPMENT/TESTING**: Uses external database with port for active license testing
   - Configuration: `DB_SERVER=100.80.118.68,49759` (port overrides instance name)
 - **The db.ts automatically handles both**: Detects if port is present and configures accordingly
 
-**SQL Server Connection Commands:**
+**🔐 Recommended Method: Using sql.ps1 (Secure Credential Storage)**
+
+The project includes `sql.ps1` - a PowerShell script that uses encrypted credentials stored locally. This is the **preferred method** for all SQL queries:
+
+```bash
+# Quick queries
+powershell -File sql.ps1 "SELECT TOP 5 * FROM sys.tables"
+
+# Run SQL script files
+powershell -File sql.ps1 -f scripts/sql/00-VERIFICATION.sql
+
+# Interactive SQL session
+powershell -File sql.ps1
+```
+
+**Benefits:**
+- ✅ No password in command line or history
+- ✅ No permission prompts for repeated queries
+- ✅ Credentials encrypted in `.sqlcred` file
+- ✅ Works seamlessly from Git Bash and PowerShell
+- ✅ Ideal for automation and Claude Code usage
+
+**Setup (one-time):**
+```powershell
+powershell -Command '$pw = ConvertTo-SecureString "National09" -AsPlainText -Force; ConvertFrom-SecureString $pw | Out-File .sqlcred'
+```
+
+**Alternative Method: Direct sqlcmd (Not Recommended)**
+
+For manual one-off queries, you can use sqlcmd directly, but this requires entering the password each time:
+
 - `sqlcmd -S 'localhost\NATIONALSOFT' -U sa -P 'PASSWORD' -Q "QUERY"` - Production (instance name)
 - `sqlcmd -S "tcp:100.80.118.68,49759" -U sa -P 'PASSWORD' -Q "QUERY"` - Testing (with port)
 
 **CRITICAL SQL Server Connection Notes:**
+
 - **Always quote the server name** with single quotes when using instance: `'localhost\NATIONALSOFT'`
 - **Alternative approaches if connection fails:**
   - Escape backslash: `localhost\\NATIONALSOFT`
@@ -214,6 +255,29 @@ The SoftRestaurant v11 database contains **366 tables** with a sophisticated mul
 - **189 foreign key relationships** ensuring referential integrity
 - **Multi-tenant support** through `WorkspaceId` (uniqueidentifier) columns
 - **Avoqado integration tables** already installed for real-time sync
+
+### 🔑 CRITICAL: WorkspaceId Architecture (v11)
+
+**IMPORTANT**: Each entity has its **OWN unique WorkspaceId** - they do NOT share WorkspaceIds!
+
+```sql
+-- Example: Order folio 3 with 2 items and 1 payment
+tempcheques:        folio=3,     WorkspaceId=3E4D9070-D76D-4387-8A49-12143F84AA2D  (order)
+tempcheqdet:        foliodet=3,  WorkspaceId=309FF1B2-BE05-4CB5-9BB7-B09B510BF4DC  (item 1)
+tempcheqdet:        foliodet=3,  WorkspaceId=2FDB2D3F-1F79-47F7-BE65-63547F137347  (item 2)
+tempchequespagos:   folio=3,     WorkspaceId=A1B2C3D4-E5F6-G7H8-I9J0-K1L2M3N4O5P6  (payment)
+turnos:             idturno=962, WorkspaceId=F1E2D3C4-B5A6-9788-6655-443322110099  (shift)
+
+-- ✅ All belong to same order because folio/foliodet = 3
+-- ✅ Each has its own UNIQUE WorkspaceId
+-- ✅ Entity IDs for v11 are just the WorkspaceId (no concatenation, no suffixes)
+```
+
+**Key Points:**
+- WorkspaceId is a **GUID per entity** (not a tenant identifier)
+- Entities relate through **folio/foliodet numbers**, NOT through WorkspaceId
+- In v11, Entity ID = WorkspaceId (e.g., `309FF1B2-BE05-4CB5-9BB7-B09B510BF4DC`)
+- In v10, Entity ID = `{InstanceId}:{IdTurno}:{Folio}` or `{InstanceId}:{IdTurno}:{Folio}:{Movimiento}`
 
 ### Core Philosophy: Transactional Lifecycle
 
@@ -340,12 +404,40 @@ transactional lifecycle.
 
 ### SQL Script Workflow (Execute in Order)
 
-1. **`00-Verificacion.sql`** - Quick system status check (can run anytime)
-2. **`01-Diagnostico.sql`** - Comprehensive diagnostic before any changes
-3. **`02-Limpieza.sql`** - Complete cleanup of all Avoqado objects (if needed)
-4. **`03-Instalacion.sql`** - Main installation script (creates all required objects)
-5. **`04-Pruebas.sql`** - Testing script to verify installation
-6. **`06-Version-Detection-Support.sql`** - ✅ NEW: Version detection system (v2.4.0)
+**IMPORTANT**: All scripts now use `DB_NAME()` for database detection. Run them against your target database context.
+
+#### Core Installation & Verification
+
+1. **`00-VERIFICATION.sql`** - Quick system status check (can run anytime)
+   - ✅ Enhanced with trigger enabled/disabled status
+   - ✅ Validates new tables (AvoqadoDebugLog, AvoqadoPartialPayments, AvoqadoShiftArchiving)
+2. **`00-CLEANUP-ALL.sql`** - Complete cleanup of all Avoqado objects (for fresh install)
+   - ✅ Synchronized with all new v2.5.0 objects
+3. **`01-COMPLETE-INSTALL.sql`** - Main installation script (creates all required objects)
+   - ✅ Includes AvoqadoDebugLog table for sp_ApplyPartialPayment debugging
+   - ✅ Includes AvoqadoPartialPayments table for payment tracking
+   - ✅ Includes AvoqadoShiftArchiving table for improved shift close protection
+   - ✅ Added sp_BeginShiftArchiving and sp_EndShiftArchiving procedures
+   - ✅ Added sp_CleanupOldTrackingRecords for automatic maintenance
+   - ✅ Improved triggers with flag-based shift close detection
+4. **`02-TESTING.sql`** - Testing script to verify installation
+5. **`03-DIAGNOSTICS.sql`** - Comprehensive diagnostic and monitoring
+   - ✅ Includes cleanup recommendations based on AvoqadoTracking age
+
+#### Advanced Diagnostic & Testing Tools (v2.5.0)
+
+6. **`98-CLEAN-TESTING-PROCEDURE.sql`** - 🆕 Step-by-step testing guide
+
+   - Complete walkthrough for testing Avoqado payment integration
+   - Includes pre/post shift-close verification steps
+   - Troubleshooting guide for missing payments in shift reports
+   - **Usage**: Run after fresh installation to validate complete payment flow
+
+7. **`99-SHIFT-CLOSE-DIAGNOSTIC.sql`** - 🆕 Shift close payment archiving analysis
+   - Analyzes payment WorkspaceId matching between orders and payments
+   - Simulates archiving queries to predict what will be archived
+   - Compares temp\* table data with archived data
+   - **Usage**: Run BEFORE and AFTER shift close to diagnose archiving issues
 
 ### Database Architecture
 
@@ -381,14 +473,59 @@ transactional lifecycle.
 - **`estaciones`** - POS terminal/station setup
 - **`usuarios`** - User accounts and permissions
 - **`workspace_*`** tables - Multi-tenant workspace management
+- **`parametros`**, **`parametros2`**, **`parametros3`** - System parameters and configuration flags
+- **`configuracion`** - **CRITICAL: Contains fiscal day configuration (see below)**
+
+#### 🕐 Fiscal Day Configuration (IMPORTANT)
+
+**Table**: `configuracion`
+
+SoftRestaurant uses a fiscal day cycle that differs from calendar days. The fiscal day defines when reports and business operations consider a "new day" to begin:
+
+```sql
+SELECT cortezinicio, cortezfin, cortezfindiasiguiente FROM configuracion
+-- Results:
+-- cortezinicio: 06:00:00 AM        (fiscal day starts)
+-- cortezfin: 05:59:59 AM           (fiscal day ends)
+-- cortezfindiasiguiente: 1         (end time is next calendar day)
+```
+
+**What This Means**:
+- **Fiscal day window**: 6:00 AM to 5:59:59 AM (next day)
+- **Purpose**: Groups sales and reports into logical business days rather than calendar days
+- **Related setting**: `parametros2.cierrediarioaperturarturno = 1` enables automatic daily shift management
+- **Counter behavior**:
+  - `idturno` in `turnos` table: **Never resets** - increments indefinitely (965, 964, 963...)
+  - `ultimofolio` in `folios` table: **Never resets** - continues forever
+  - `ultimaorden` in `folios` table: **Resets to 0** on shift close
+  - `ultimofolioproduccion` in `folios` table: **Resets to 0** on shift close
+
+**IMPORTANT**: This configuration determines when shift reports consider a new business day. All sales between 6:00 AM and 5:59:59 AM (next day) are grouped together for reporting purposes.
 
 #### Avoqado Integration Tables
 
+**Core Tables:**
+
 - **`AvoqadoInstanceInfo`** - Stores unique instance GUID for multi-location support
+- **`AvoqadoConfig`** - Configuration and version detection (PosVersion, HasWorkspaceId)
 - **`AvoqadoTracking`** - Universal change tracking table for orders, items, shifts, payments
   - Primary key with unique constraint on EntityType + EntityId
   - Indexed on Timestamp + EntityType for performance
   - Tracks Operation (CREATE, UPDATE, DELETE) and ProcessedAt timestamp
+- **`AvoqadoCommands`** - Command queue for Avoqado → POS operations
+
+**New Tables (v2.5.0):**
+
+- **`AvoqadoDebugLog`** ✅ - Debug logging for sp_ApplyPartialPayment operations
+  - Indexed on Timestamp for performance
+  - Tracks payment processing flow with detailed messages
+- **`AvoqadoPartialPayments`** ✅ - Partial payment tracking table
+  - Indexed on Folio + IsProcessed for quick lookups
+  - Tracks payment amount, method, and processing status
+- **`AvoqadoShiftArchiving`** ✅ - Shift archiving state management
+  - Prevents spurious deletion events during shift close
+  - Uses flag-based approach instead of time window (more reliable for large shifts)
+  - Auto-cleans old records after 7 days
 
 #### Enhanced POS Tables
 
@@ -400,14 +537,36 @@ The service integrates with existing POS tables through trigger-based change tra
 
 #### Stored Procedures
 
+**Sync Operations:**
+
 - **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (batched, max 100)
 - **`sp_MarkChangesProcessed`** - Marks changes as processed after successful sync
+
+**Payment Operations:**
+
 - **`sp_ApplyPartialPayment`** - Handles partial payment processing and validation
+  - Includes comprehensive debug logging to AvoqadoDebugLog
+  - Implements SoftRestaurant-style quantity adjustment for partial payments
+
+**Shift Management (v2.5.0):**
+
+- **`sp_BeginShiftArchiving`** ✅ - Marks shift as being archived (prevents spurious deletion events)
+- **`sp_EndShiftArchiving`** ✅ - Marks shift archiving as complete
+
+**Maintenance (v2.5.0):**
+
+- **`sp_CleanupOldTrackingRecords`** ✅ - Automated cleanup of old processed/error records
+  - Deletes processed records older than X days (default: 7)
+  - Deletes trigger errors (RetryCount=99) older than X days
+  - Deletes failed records (RetryCount>=5) older than X days
 
 #### Database Triggers (SQL Server 2014 Compatible)
 
 - **`Trg_Avoqado_Orders`** - Tracks order creation, updates, and deletions on `tempcheques`
+  - ✅ Improved (v2.5.0): Uses AvoqadoShiftArchiving flag + 30s fallback for shift close protection
+  - ✅ More reliable for large shifts with >30 second archiving time
 - **`Trg_Avoqado_OrderItems`** - Tracks individual item changes within orders on `tempcheqdet`
+- **`Trg_Avoqado_Payments`** - Tracks payment insertions on `tempchequespagos`
 - **`Trg_Avoqado_Shifts`** - Tracks shift opening and closing events on `turnos`
 
 #### Index Strategy
@@ -465,11 +624,13 @@ with SoftRestaurant's application layer.
 
 ## SoftRestaurant Documentation Reference
 
-This repository contains comprehensive documentation of SoftRestaurant v11 POS system for development and integration purposes. The documentation is organized into several interconnected files and directories that provide complete technical coverage.
+This repository contains comprehensive documentation of SoftRestaurant v11 POS system for development and integration purposes. The
+documentation is organized into several interconnected files and directories that provide complete technical coverage.
 
 ### 📁 Master Documentation
 
 **Primary Reference**: `docs/SoftRestaurant_Master_Documentation.md`
+
 - Central hub for all SoftRestaurant knowledge
 - Complete overview of documentation structure
 - Integration architecture and business flows
@@ -478,6 +639,7 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 ### 📁 Configuration & Client Onboarding
 
 **File**: `SoftRestaurant_Configuration_Guide.md`
+
 - **Purpose**: Complete guide for onboarding new Avoqado clients
 - **Key Topics**:
   - Multi-tenant WorkspaceId management (1000+ active tenants)
@@ -491,6 +653,7 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 ### 📁 Technical Solutions
 
 **File**: `SOFTRESTAURANT_ENTITY_RESOLUTION.md`
+
 - **Purpose**: Documents the solution for SoftRestaurant's unique order processing behavior
 - **Key Topics**:
   - Order creation with idturno=0 → real idturno transition
@@ -502,9 +665,11 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 ### 📁 Database Schema Reference (info-softrest11/)
 
 **Directory Overview**: `info-softrest11/README.md` (Spanish)
+
 - Complete structure explanation of database reference files
 
 **Schema Information** (`info-softrest11/database-schema/`):
+
 - `table-definitions.csv` - All 366 tables in the system
 - `table-relationships.csv` - Complete column definitions and data types
 - `core-relationships.csv` - Critical table relationships
@@ -512,11 +677,13 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 - `constraints/` - Foreign keys (189 relationships), indexes, primary keys
 
 **Business Flow Traces** (`info-softrest11/sql-traces/`):
+
 - `shift-close-flow.sql` - Real SQL Server Profiler trace of shift closure (203ms timing)
 - `order-lifecycle-flow.sql` - Complete order creation to payment process
 - **Source**: Actual production SQL Server 2014 traces
 
 **Table Analysis** (`info-softrest11/table-analysis/`):
+
 - `turnos-table-details.sql` - Critical shifts table structure analysis
 - Documents dual-key architecture (idturnointerno vs idturno)
 
@@ -525,21 +692,25 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 **Avoqado-Specific Components**:
 
 **Stored Procedures**:
+
 - `sp_GetPendingChanges.sql` - Retrieves unprocessed entity changes for sync
 - `sp_MarkChangesProcessed.sql` - Marks changes as processed after sync
 - `sp_ApplyPartialPayment.sql` - Partial payment processing and validation
 
 **Functions**:
+
 - `fn_CanCompleteOrderPayment.sql` - Payment validation logic
 - `fn_GetPartialPaymentsTotal.sql` - Payment total calculations
 - `fn_GetSoftRestaurantVersion.sql` - Version detection
 
 **Database Triggers**:
+
 - `Trg_Avoqado_Orders.sql` - Order change tracking
 - `Trg_Avoqado_OrderItems.sql` - Order item change tracking
 - `Trg_Avoqado_Shifts.sql` - Shift change tracking
 
 **Table Schemas**:
+
 - `tempcheques_columns.txt` - Complete order table structure (194 columns)
 - `AvoqadoEntityTracking_*` - Change tracking table analysis
 - `AvoqadoPartialPayments_*` - Partial payment table analysis
@@ -547,6 +718,7 @@ This repository contains comprehensive documentation of SoftRestaurant v11 POS s
 ### 📋 Quick Reference Commands
 
 **Find Table Information**:
+
 ```bash
 # Search for specific table
 grep -i "tempcheques" info-softrest11/database-schema/table-definitions.csv
@@ -559,6 +731,7 @@ grep -i "UPDATE turnos" info-softrest11/sql-traces/shift-close-flow.sql
 ```
 
 **Database Analysis**:
+
 ```bash
 # List all integration stored procedures
 ls analysis/db/sp_*.sql
@@ -573,21 +746,25 @@ ls analysis/db/Trg_*.sql
 ### 🔍 Documentation Usage Patterns
 
 **For New Developers**:
+
 1. Start with `docs/SoftRestaurant_Master_Documentation.md` - complete overview
 2. Read `SoftRestaurant_Configuration_Guide.md` - understand configuration
 3. Review `SOFTRESTAURANT_ENTITY_RESOLUTION.md` - understand unique challenges
 
 **For Client Onboarding**:
+
 1. Use `SoftRestaurant_Configuration_Guide.md` as primary checklist
 2. Reference `info-softrest11/database-schema/` for schema validation
 3. Check WorkspaceId isolation requirements
 
 **For Debugging Issues**:
+
 1. Check `SOFTRESTAURANT_ENTITY_RESOLUTION.md` for entity ID problems
 2. Use `info-softrest11/sql-traces/` to understand expected business flows
 3. Reference `analysis/db/` for integration-specific database objects
 
 **For Database Changes**:
+
 1. Review `info-softrest11/database-schema/constraints/` for relationships
 2. Check `table-create-statements.sql` for recreation procedures
 3. Validate against `analysis/db/` integration objects
@@ -826,6 +1003,7 @@ GROUP BY
 ## 🚨 CRITICAL: Documentation Synchronization Rule
 
 **MANDATORY REQUIREMENT**: Every time ANY change is made to:
+
 - Database schema (tables, columns, procedures, triggers)
 - Stored procedure signatures or functionality
 - Integration architecture or data flow
@@ -833,18 +1011,21 @@ GROUP BY
 - Core system behavior or implementation
 
 **MUST IMMEDIATELY UPDATE ALL DOCUMENTATION FILES:**
+
 - `CLAUDE.md` (primary project documentation)
 - `AGENTS.md` (agent-specific documentation)
 - `docs/SoftRestaurant_Master_Documentation.md` (master reference)
 - Any relevant SQL diagnostic/test scripts
 
 **WHY THIS IS CRITICAL:**
+
 - Documentation drift leads to confusion and incorrect assumptions
 - Outdated docs can cause developers to implement deprecated patterns
 - Inconsistent documentation wastes debugging time
 - New team members will follow outdated guidance
 
 **PROCESS:**
+
 1. Make the technical change
 2. IMMEDIATELY update all related documentation
 3. Verify documentation consistency across all files

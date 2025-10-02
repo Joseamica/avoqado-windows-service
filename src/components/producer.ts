@@ -595,10 +595,11 @@ async function processOrderItemChange(change: ChangeNotification, venueId: strin
     }
 
     if (detectedVersion >= 11.0) {
-      // v11 format: WorkspaceId:Sequence
+      // 🔧 FIX: v11 format is JUST the WorkspaceId (no colon, no sequence)
+      // Each order item has its own unique WorkspaceId
       const parts = change.EntityId.split(':')
-      if (parts.length !== 2) {
-        log.error(`[OrderItem Processor] EntityId v11 inválido: ${change.EntityId}`)
+      if (parts.length !== 1) {
+        log.error(`[OrderItem Processor] EntityId v11 inválido: ${change.EntityId} (expected just WorkspaceId, got ${parts.length} parts)`)
         return null
       }
       return await processOrderItemChangeV11(change, venueId, parts)
@@ -676,28 +677,27 @@ async function processOrderItemChangeV11(
   parts: string[],
 ): Promise<{ payload: object } | null> {
   try {
-    const [workspaceId, sequence] = parts
+    // 🔧 FIX: In v11, EntityId IS the item's WorkspaceId (not order WorkspaceId + sequence)
+    const itemWorkspaceId = parts[0]
 
     if (change.Operation === 'DELETE') {
-      // For v11, we need to find the parent order by WorkspaceId
-      // Since the order item is being deleted, we might not find it in the DB
-      // We'll try to find the parent order by the WorkspaceId from the EntityId
-      return { payload: { venueId, parentOrderExternalId: workspaceId, itemData: { externalId: change.EntityId, deleted: true } } }
+      // For DELETE, we can't look up the item anymore, so just return minimal info
+      // Backend will handle linking to parent order
+      return { payload: { venueId, parentOrderExternalId: null, itemData: { externalId: change.EntityId, deleted: true } } }
     }
 
     const pool = getDbPool()
 
-    // In v11, we need to find the item by order WorkspaceId and sequence
+    // 🔧 FIX: Query by item's WorkspaceId directly (not by order + movimiento)
     const itemRes = await pool
       .request()
-      .input('workspaceId', sql.UniqueIdentifier, workspaceId)
-      .input('movimiento', sql.Int, sequence)
+      .input('itemWorkspaceId', sql.UniqueIdentifier, itemWorkspaceId)
       .query(
         `SELECT td.*, p.descripcion as nombreproducto, tc.WorkspaceId as orderWorkspaceId
          FROM tempcheqdet td
          LEFT JOIN productos p ON td.idproducto = p.idproducto
          INNER JOIN tempcheques tc ON td.foliodet = tc.folio
-         WHERE tc.WorkspaceId = @workspaceId AND td.movimiento = @movimiento`,
+         WHERE td.WorkspaceId = @itemWorkspaceId`,
       )
 
     if (!itemRes.recordset[0]) {
@@ -706,14 +706,14 @@ async function processOrderItemChangeV11(
     }
 
     const posItemData = itemRes.recordset[0]
-    const parentOrderExternalId = posItemData.orderWorkspaceId || workspaceId
+    const parentOrderExternalId = posItemData.orderWorkspaceId
 
     const payload = {
       venueId,
       parentOrderExternalId,
       itemData: {
         externalId: change.EntityId,
-        sequence: parseInt(sequence),
+        sequence: parseInt(posItemData.movimiento || 0), // Get sequence from DB, not from EntityId
         productExternalId: posItemData.idproducto,
         productName: posItemData.nombreproducto || 'Producto Desconocido',
         quantity: parseFloat(posItemData.cantidad || 0),

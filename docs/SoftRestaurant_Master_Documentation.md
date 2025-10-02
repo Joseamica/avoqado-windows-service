@@ -258,6 +258,41 @@ INSERT INTO foliosfacturas (
 - **ALWAYS** test in staging before production
 - **ALWAYS** backup before configuration changes
 
+### 🕐 Fiscal Day Configuration (CRITICAL)
+
+#### Overview
+SoftRestaurant uses a **fiscal day cycle** that differs from calendar days. This configuration is stored in the `configuracion` table and determines when the system considers a "new business day" to begin.
+
+**Table**: `configuracion`
+
+```sql
+SELECT cortezinicio, cortezfin, cortezfindiasiguiente FROM configuracion
+-- Results:
+-- cortezinicio: 06:00:00 AM        (fiscal day starts)
+-- cortezfin: 05:59:59 AM           (fiscal day ends)
+-- cortezfindiasiguiente: 1         (end time is next calendar day)
+```
+
+#### What This Means
+- **Fiscal day window**: 6:00 AM to 5:59:59 AM (next day)
+- All sales between 6:00 AM and 5:59:59 AM are grouped together for reporting
+- Late-night sales (12 AM - 5:59 AM) belong to the **previous** business day
+- A sale at 2 AM on January 2nd appears in the January 1st fiscal day report
+
+#### Counter Behavior
+- `idturno` in `turnos` table: **Never resets** - increments indefinitely (1, 2, 3...)
+- `ultimofolio` in `folios` table: **Never resets** - continues forever
+- `ultimaorden` in `folios` table: **Resets to 0** on shift close
+- `ultimofolioproduccion` in `folios` table: **Resets to 0** on shift close
+
+#### Impact on Client Onboarding
+- Set client expectations: Reports use fiscal day (6 AM start), not calendar day
+- Late-night operations: Sales after midnight belong to previous fiscal day
+- Shift closures should ideally occur within fiscal day window
+- Related setting: `parametros2.cierrediarioaperturarturno = 1` enables automatic daily shift management
+
+**Full Details**: See `SoftRestaurant_Configuration_Guide.md` - Fiscal Day Configuration section
+
 ---
 
 ## Troubleshooting & Entity Resolution

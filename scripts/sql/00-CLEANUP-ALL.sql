@@ -2,13 +2,15 @@
 -- COMPLETE CLEANUP - Remove ALL Avoqado objects
 -- Run this to start fresh
 -- ====================================================================
-
-USE avov2;
-GO
+--
+-- USAGE: This script will run on the CURRENT database context.
+-- ====================================================================
 
 PRINT '======================================================================'
 PRINT ' CLEANING UP ALL AVOQADO OBJECTS'
 PRINT '======================================================================'
+PRINT ''
+PRINT 'Cleaning Database: ' + DB_NAME()
 PRINT ''
 
 -- Drop triggers
@@ -55,6 +57,24 @@ BEGIN
     PRINT '✅ Dropped sp_MarkChangesProcessed'
 END
 
+IF OBJECT_ID('sp_BeginShiftArchiving', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_BeginShiftArchiving
+    PRINT '✅ Dropped sp_BeginShiftArchiving'
+END
+
+IF OBJECT_ID('sp_EndShiftArchiving', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_EndShiftArchiving
+    PRINT '✅ Dropped sp_EndShiftArchiving'
+END
+
+IF OBJECT_ID('sp_CleanupOldTrackingRecords', 'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE sp_CleanupOldTrackingRecords
+    PRINT '✅ Dropped sp_CleanupOldTrackingRecords'
+END
+
 IF OBJECT_ID('sp_EnsureAvoqadoPaymentMethod', 'P') IS NOT NULL
 BEGIN
     DROP PROCEDURE sp_EnsureAvoqadoPaymentMethod
@@ -88,6 +108,18 @@ BEGIN
 END
 
 -- Drop tables (in order to handle dependencies)
+IF OBJECT_ID('AvoqadoShiftArchiving', 'U') IS NOT NULL
+BEGIN
+    DROP TABLE AvoqadoShiftArchiving
+    PRINT '✅ Dropped AvoqadoShiftArchiving'
+END
+
+IF OBJECT_ID('AvoqadoDebugLog', 'U') IS NOT NULL
+BEGIN
+    DROP TABLE AvoqadoDebugLog
+    PRINT '✅ Dropped AvoqadoDebugLog'
+END
+
 IF OBJECT_ID('AvoqadoPartialPayments', 'U') IS NOT NULL
 BEGIN
     DROP TABLE AvoqadoPartialPayments
@@ -116,6 +148,37 @@ IF OBJECT_ID('AvoqadoInstanceInfo', 'U') IS NOT NULL
 BEGIN
     DROP TABLE AvoqadoInstanceInfo
     PRINT '✅ Dropped AvoqadoInstanceInfo'
+END
+
+-- Drop old Avoqado columns (from experimental versions)
+IF COL_LENGTH('tempcheqdet', 'AvoqadoOriginalQty') IS NOT NULL
+BEGIN
+    ALTER TABLE tempcheqdet DROP COLUMN AvoqadoOriginalQty
+    PRINT '✅ Dropped tempcheqdet.AvoqadoOriginalQty column'
+END
+
+IF COL_LENGTH('tempcheques', 'AvoqadoOriginalTotal') IS NOT NULL
+BEGIN
+    ALTER TABLE tempcheques DROP COLUMN AvoqadoOriginalTotal
+    PRINT '✅ Dropped tempcheques.AvoqadoOriginalTotal column'
+END
+
+IF COL_LENGTH('tempcheques', 'AvoqadoLastModifiedAt') IS NOT NULL
+BEGIN
+    ALTER TABLE tempcheques DROP COLUMN AvoqadoLastModifiedAt
+    PRINT '✅ Dropped tempcheques.AvoqadoLastModifiedAt column'
+END
+
+IF COL_LENGTH('tempcheqdet', 'AvoqadoLastModifiedAt') IS NOT NULL
+BEGIN
+    ALTER TABLE tempcheqdet DROP COLUMN AvoqadoLastModifiedAt
+    PRINT '✅ Dropped tempcheqdet.AvoqadoLastModifiedAt column'
+END
+
+IF COL_LENGTH('turnos', 'AvoqadoLastModifiedAt') IS NOT NULL
+BEGIN
+    ALTER TABLE turnos DROP COLUMN AvoqadoLastModifiedAt
+    PRINT '✅ Dropped turnos.AvoqadoLastModifiedAt column'
 END
 
 -- Remove payment methods (optional - commented out by default)

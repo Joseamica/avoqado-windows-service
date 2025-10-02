@@ -186,6 +186,51 @@ Records payment details for each sale.
 - `dev_estrateca`: 0 (Estrateca integration)
 - `multiformaspago`: 0 (Multiple payment forms)
 
+### Table: `configuracion` 🕐 **CRITICAL: Fiscal Day Configuration**
+
+#### Fiscal Day Window Settings:
+
+SoftRestaurant uses a **fiscal day cycle** that differs from calendar days. This configuration determines when the system considers a "new business day" to begin for reporting and shift management purposes.
+
+**Key Fields**:
+```sql
+SELECT cortezinicio, cortezfin, cortezfindiasiguiente FROM configuracion
+```
+
+**Typical Configuration**:
+- `cortezinicio`: **06:00:00 AM** - Fiscal day starts at 6:00 AM
+- `cortezfin`: **05:59:59 AM** - Fiscal day ends at 5:59:59 AM
+- `cortezfindiasiguiente`: **1** - End time is on the next calendar day
+
+**What This Means**:
+- The fiscal day runs from **6:00 AM to 5:59:59 AM** (next day)
+- All sales between 6:00 AM and 5:59:59 AM are grouped together for reporting
+- Shift reports and daily closures respect this fiscal day window
+- This differs from calendar day (midnight to midnight)
+
+**Related Settings**:
+- `parametros2.cierrediarioaperturarturno = 1` - Enables automatic daily shift management
+
+**Counter Behavior** (Important for Understanding System):
+- `idturno` in `turnos` table: **Never resets** - increments indefinitely (1, 2, 3, 4...)
+- `ultimofolio` in `folios` table: **Never resets** - continues forever
+- `ultimaorden` in `folios` table: **Resets to 0** on shift close
+- `ultimofolioproduccion` in `folios` table: **Resets to 0** on shift close
+
+**Why This Matters for Client Onboarding**:
+- Clients may expect reports to align with calendar days (midnight-midnight)
+- The 6 AM start time means late-night sales (12 AM - 5:59 AM) belong to the **previous** business day
+- Important for reconciliation: A sale at 2 AM on January 2nd will appear in the January 1st fiscal day report
+- Shift closures should ideally occur within the fiscal day window for clean reporting
+
+**Common Client Questions**:
+- Q: "Why do my 2 AM sales show on yesterday's report?"
+- A: Because the fiscal day runs 6 AM - 5:59 AM next day
+- Q: "Can we change the fiscal day start time?"
+- A: Yes, by updating `cortezinicio` and `cortezfin` in the `configuracion` table
+- Q: "What if we close a shift at 3 AM?"
+- A: The shift will still belong to the previous fiscal day (correct behavior for late-night operations)
+
 ---
 
 ## POS Terminal Configuration

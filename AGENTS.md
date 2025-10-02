@@ -1,566 +1,113 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Purpose
+- Provide ChatGPT (Codex) with repository-specific guidance when implementing, reviewing, or documenting changes.
+- Use this document together with `CLAUDE.md`, `docs/SoftRestaurant_Master_Documentation.md`, and the SQL scripts inside `scripts/sql`.
 
 ## Project Overview
-
-This is a Windows service that acts as a real-time synchronization bridge between a local Point-of-Sale (POS) system and the central Avoqado
-platform. It continuously monitors the POS database for changes to orders, items, and shifts, publishing these events to a RabbitMQ message
-broker. It also listens for commands from the Avoqado platform and executes them on the local POS system, ensuring seamless bidirectional
-data consistency.
-
-**Key Features:**
-
-- Real-time event publishing with debounced order updates
-- Bidirectional sync (Producer polling + Commander execution)
-- POS adapter architecture for different POS systems (currently SoftRestaurant v11)
-- Windows service integration with health monitoring
-- Resilient configuration management with automatic error recovery
-
-## Common Commands
-
-### Development & Build
-
-- `npm run dev` - Run with hot-reload using nodemon
-- `npm run build` - Compile TypeScript to JavaScript
-- `npm start` - Run the compiled application
-
-### Code Quality
-
-- `npm run format` - Format code with Prettier
-- `npm run check-format` - Check code formatting
-
-### Windows Service Management (requires admin privileges)
-
-- `npm run svc:install` - Install as Windows service
-- `npm run svc:uninstall` - Uninstall Windows service
-
-### Packaging
-
-- `npm run package` - Build and create AvoqadoSyncService.exe
-
-### Database Access & Debugging
-
-- `sqlcmd -S 'localhost\NATIONALSOFT' -U sa -P 'PASSWORD' -Q "QUERY"` - Direct SQL Server query (note: quoted server name)
-- `sqlcmd -S 'localhost\NATIONALSOFT' -U sa -P 'PASSWORD' -d DATABASE_NAME -Q "QUERY"` - Query specific database
-
-**CRITICAL SQL Server Connection Notes:**
-
-- **Always quote the server name** with single quotes: `'localhost\NATIONALSOFT'`
-- **Alternative approaches if connection fails:**
-  - Escape backslash: `localhost\\NATIONALSOFT`
-  - Force TCP: `"tcp:localhost\NATIONALSOFT"`
-  - Use IP and port: `127.0.0.1,1433`
-- **Available databases:** `softrestaurant10`, `softrestaurant11`
-- **Version differences:**
-  - v10: No WorkspaceId, No Avoqado integration
-  - v11: Has WorkspaceId per entity, Has Avoqado integration tables
-
-## SoftRestaurant POS System Architecture
-
-### SQL Server Version
-
-**CRITICAL:** This POS system runs on **Microsoft SQL Server 2014 Express Edition (32-bit)** - Version 12.0.4100.1 Intel X86. All database
-operations, triggers, and stored procedures must be compatible with SQL Server 2014 syntax and features.
-
-### Database Schema Overview
-
-The SoftRestaurant v11 database contains **366 tables** with a sophisticated multi-tenant architecture:
-
-- **366 total tables** including core business logic, configuration, and integration tables
-- **189 foreign key relationships** ensuring referential integrity
-- **Multi-tenant support** through `WorkspaceId` (uniqueidentifier) columns
-- **Avoqado integration tables** already installed for real-time sync
-
-### Core Philosophy: Transactional Lifecycle
-
-The POS operates on a fundamental principle: a transactional lifecycle based on temporary tables for active operations and permanent tables
-for historical data. The main entity (an order or "cheque") doesn't exist in a single state but transitions through well-defined phases,
-leaving a clear trace in the database.
-
-### Key Tables in the Lifecycle:
-
-- **`tempcheques`**: Contains active orders from the current shift. High-transactional table with **194 columns** including totals,
-  payments, customer info, and Avoqado integration
-- **`cheques`**: Historical archive. Contains exact copies of orders once they've been closed (paid or cancelled) and the shift ends
-- **`turnos`**: Manages temporal context of operations. An order always belongs to a shift
-  - **CRITICAL**: Uses Dual-Key Architecture - `idturnointerno` (PK) + `idturno` (Business Key)
-  - **Applications use**: `idturno` for all business operations and queries
-  - **Database uses**: `idturnointerno` as technical primary key (auto-increment)
-- **`tempcheqdet`**: Order line items (products, quantities, prices, modifications)
-- **`tempchequespagos`**: Payment records for active orders
-
-### Critical Fields in tempcheques Table (194 columns total):
-
-- **Primary Key**: `folio` (bigint) - Unique order identifier
-- **Status Fields**: `pagado` (bit), `cancelado` (bit), `impreso` (bit) - Order lifecycle gates
-- **Business Fields**: `total` (money), `subtotal` (money), `idturno` (bigint), `mesa` (varchar)
-  - **IMPORTANT**: `idturno` references business key in `turnos`, not the PK `idturnointerno`
-- **Multi-tenant**: `WorkspaceId` (uniqueidentifier) - For multi-location support
-- **Avoqado Integration**: `AvoqadoLastModifiedAt` (datetime2) - Change tracking timestamp
-
-### 4 Phases of Order Lifecycle:
-
-#### Phase 1: Open Order in Modification 📝
-
-- **Tables**: `tempcheques` + `tempcheqdet` (item details)
-- **Process**: When a waiter opens a new table/account, creates record with `pagado=0`, `cancelado=0`, `impreso=0`
-- **Logic**: Order is "volatile". Totals constantly recalculated after each item modification
-
-#### Phase 2: Consolidation & Presentation (Print Bill) 🖨️
-
-- **Tables**: `tempcheques`
-- **Process**: Before printing, system recalculates totals, obtains sequential `numcheque`, sets `impreso=1`
-- **Logic**: `impreso=1` acts as gatekeeper - order cannot be paid without this flag
-
-#### Phase 3: Settlement (Pay Bill) 💳
-
-- **Tables**: `tempchequespagos`, `tempcheques`
-- **Process**: Verifies `impreso=1`, inserts payment record, sets `pagado=1`
-- **Logic**: Payment insertion and `pagado=1` finalize active order life
-
-#### Phase 4: Archive & Purge (Shift Close) 🗄️
-
-- **Tables**: All (temp\* to permanent counterparts)
-- **Process**: Complete transactional archiving process within a single transaction
-- **Logic**: DELETE from temp\* tables at shift end is normal lifecycle, NOT cancellation
-
-**Technical Implementation (SQL Server 2014 Compatible):**
-
-1. **Pre-Archive Validation**: Verify shift has no open orders and check constraints
-2. **Master Archive Operations** (within transaction):
-   - `INSERT INTO cheques SELECT * FROM tempcheques WHERE idturno=X`
-   - `INSERT INTO cheqdet SELECT * FROM tempcheqdet d INNER JOIN tempcheques t...`
-   - `INSERT INTO chequespagos SELECT * FROM tempchequespagos p INNER JOIN tempcheques t...`
-3. **Auxiliary Archive Operations**:
-   - `INSERT INTO cancela` - Canceled item records
-   - `INSERT INTO cheqpedidos` - Order-to-delivery mapping
-   - `INSERT INTO bitacoratarjetacredito` - Credit card transaction logs
-   - `INSERT INTO numerostarjetas` - Loyalty card transactions
-   - `INSERT INTO foliosfacturados` - Invoice relationships
-4. **Table Management & Cleanup**:
-   - Free table assignments: `UPDATE mesas SET estatus_ocupacion=0`
-   - Clear production queue: `DELETE FROM PRODUCTOSENPRODUCCION WHERE folio IN...`
-   - Reset counter sequences: `UPDATE folios SET ultimaorden=0, ultimofolioproduccion=0`
-5. **Shift Finalization**:
-   - `UPDATE turnos SET cierre=GETDATE() WHERE idturno=X` (CRITICAL: This triggers shift close detection)
-   - **NOTE**: Actual DELETE from temp\* tables happens AFTER shift close timestamp is set
-
-### Database Relationships & Integrity
-
-The system maintains data integrity through **189 foreign key relationships**:
-
-- **Product relationships**: `productos` ← `tempcheqdet`, `cheqdet` (order items reference products)
-- **Customer relationships**: `clientes` ← `tempcheques` (orders reference customers)
-- **Payment relationships**: `formasdepago` ← `tempchequespagos` (payments reference payment methods)
-- **Area relationships**: `areasrestaurant` ← `tempcheques` (orders reference restaurant areas)
-- **Enterprise relationships**: `empresas` ← multiple tables (multi-company support)
-
-### Shift Close Process Technical Details
-
-**Critical Database Operations Sequence:**
-
-1. **Archive Phase** (Lines 79-88 in trace):
-   - Data migration from temp\* to permanent tables within single transaction
-   - All `INSERT INTO [permanent] SELECT * FROM [temp*] WHERE idturno=X` operations
-   - **Time Duration**: ~6 seconds for full archive process
-2. **Cleanup Phase** (Lines 89-94):
-   - Table status reset and production queue cleanup
-   - Mesa assignments freed and occupancy status cleared
-3. **Finalization Phase** (Line 95):
-   - **CRITICAL**: `UPDATE turnos SET cierre='timestamp' WHERE idturno=X`
-   - This UPDATE is the definitive marker for shift closure
-   - **Performance Note**: Line 95 shows 203ms execution time with 3697 logical reads
-4. **Post-Close Operations** (Lines 96-98):
-   - Sequence counter resets
-   - Transaction commit
-
-**Key Timing Patterns from Real Trace:**
-
-- **Transaction Start**: `set implicit_transactions on` (Line 74)
-- **Archive Duration**: ~6 seconds (Lines 79-94)
-- **Shift Close**: `UPDATE turnos SET cierre=...` (Line 95) - **THIS IS THE DETECTION POINT**
-- **Transaction Complete**: `COMMIT TRAN` (Line 98)
-
-### Avoqado Integration Role:
-
-- **Triggers**: Act as "microphones" on temp\* tables, reporting changes to `AvoqadoEntityTracking`
-- **Producer**: Intelligent debouncing, understands DELETE during shift close ≠ cancellation
-- **Context-Aware**: Detects `turnos.cierre` updates to identify legitimate shift closures
-- **Timing Intelligence**: Uses shift close timestamp detection to prevent spurious deletion events
-- **Multi-tenant**: Uses `WorkspaceId` for proper data isolation
-
-## Database Integration & SQL Scripts
-
-The service integrates deeply with SoftRestaurant POS database through a sophisticated change tracking system that respects the POS
-transactional lifecycle.
-
-### SQL Script Workflow (Execute in Order)
-
-1. **`00-Verificacion.sql`** - Quick system status check (can run anytime)
-2. **`01-Diagnostico.sql`** - Comprehensive diagnostic before any changes
-3. **`02-Limpieza.sql`** - Complete cleanup of all Avoqado objects (if needed)
-4. **`03-Instalacion.sql`** - Main installation script (creates all required objects)
-5. **`04-Pruebas.sql`** - Testing script to verify installation
-6. **`06-Version-Detection-Support.sql`** - ✅ NEW: Version detection system (v2.4.0)
-
-### Database Architecture
-
-#### SQL Server 2014 Specific Features
-
-- **Compatibility Level**: SQL Server 2014 (version 12.0.4100.1)
-- **Data Types**: Uses `money` for currency, `datetime2` for timestamps, `uniqueidentifier` for GUIDs
-- **Indexing**: Includes clustered and non-clustered indexes for performance
-- **Constraints**: Extensive use of foreign keys (189 relationships) and check constraints
-
-#### Complete Table Structure (366 Tables)
-
-**Core Business Tables:**
-
-- **`tempcheques`** (194 columns) - Active orders with comprehensive business logic
-- **`tempcheqdet`** - Order line items with product details
-- **`tempchequespagos`** - Payment records for active orders
-- **`productos`** - Product catalog with pricing and classifications
-- **`clientes`** - Customer master data with contact information
-- **`turnos`** - Shift management with opening/closing controls
-- **`areasrestaurant`** - Restaurant areas and table management
-- **`formasdepago`** - Payment methods configuration
-
-**Historical Tables:**
-
-- **`cheques`** - Archived orders (mirrors tempcheques structure)
-- **`cheqdet`** - Archived order items
-- **`chequespagos`** - Archived payment records
-
-**Configuration & Control:**
-
-- **`empresas`** - Company/enterprise configuration
-- **`estaciones`** - POS terminal/station setup
-- **`usuarios`** - User accounts and permissions
-- **`workspace_*`** tables - Multi-tenant workspace management
-
-#### Avoqado Integration Tables
-
-- **`AvoqadoInstanceInfo`** - Stores unique instance GUID for multi-location support
-- **`AvoqadoEntityTracking`** - Universal change tracking table for orders, items, shifts
-  - Primary key with unique constraint on EntityType + EntityId
-  - Indexed on LastModifiedAt + EntityType for performance
-- **`AvoqadoEntitySnapshots`** - Content hash snapshots to detect actual changes (v1 only)
-  - Unique constraint on EntityType + EntityId
-  - Indexed on EntityType + LastSentAt
-
-#### Enhanced POS Tables
-
-The service adds `AvoqadoLastModifiedAt` timestamp columns to:
-
-- **`tempcheques`** - Order headers (194 columns including totals, customer, payments)
-- **`tempcheqdet`** - Order line items (products, quantities, prices, modifications)
-- **`turnos`** - Shift information (open/close times, cashier, station)
-
-#### Stored Procedures
-
-- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (batched, max 100)
-- **`sp_MarkChangesProcessed`** - Marks changes as processed after successful sync
-- **`sp_ApplyPartialPayment`** - Handles partial payment processing and validation
-
-#### Database Triggers (SQL Server 2014 Compatible)
-
-- **`Trg_Avoqado_Orders`** - Tracks order creation, updates, and deletions on `tempcheques`
-- **`Trg_Avoqado_OrderItems`** - Tracks individual item changes within orders on `tempcheqdet`
-- **`Trg_Avoqado_Shifts`** - Tracks shift opening and closing events on `turnos`
-
-#### Index Strategy
-
-**Primary Keys:** All 366 tables have defined primary keys for data integrity **Performance Indexes:**
-
-- `IX_AvoqadoEntityTracking_Modified` - On LastModifiedAt + EntityType
-- `IX_cheques_workspaceid` - Multi-column index for workspace queries
-- `IX_cheques_fecha` - Date-based queries for reporting
-- `FYI_chequespagos_folio` - Foreign key index for payment lookups
-
-### Entity ID Format & Version Detection
-
-The service automatically detects SoftRestaurant version using `parametros2.versiondb` and generates Entity IDs accordingly:
-
-**v10 Format (version < 11.0):**
-
-- **Orders**: `{InstanceId}:{IdTurno}:{Folio}` (e.g., `abc123:894:1001`)
-- **Order Items**: `{InstanceId}:{IdTurno}:{Folio}:{Movimiento}` (e.g., `abc123:894:1001:3`)
-- **Shifts**: `{IdTurno}` (e.g., `894`)
-
-**v11 Format (version >= 11.0):**
-
-- **Orders**: `{WorkspaceId}` (e.g., `68D8362E-2311-470E-8571-AD49874E4B6D`)
-- **Order Items**: `{WorkspaceId}:{Movimiento}` (e.g., `68D8362E-2311-470E-8571-AD49874E4B6D:3`)
-- **Shifts**: `{WorkspaceId}` (e.g., `A1B2C3D4-E5F6-G7H8-I9J0-K1L2M3N4O5P6`)
-
-**Version Detection Implementation:**
-
-- **Database Function**: `dbo.fn_GetSoftRestaurantVersion()` queries `parametros2.versiondb`
-- **Stored Procedure**: `dbo.sp_GenerateEntityId` generates appropriate Entity IDs based on version
-- **Producer Logic**: Detects version on startup and uses proper format throughout execution
-- **SQL Triggers**: Use version detection instead of checking WorkspaceId column presence
-
-**CRITICAL NOTE**: All Entity IDs use `idturno` (business key), NOT `idturnointerno` (technical PK)
-
-### SoftRestaurant Dual-Key Architecture
-
-The `turnos` table implements a sophisticated dual-key pattern:
-
-- **Technical Primary Key**: `idturnointerno` (bigint, auto-increment)
-
-  - Used for database optimization and referential integrity
-  - Sequential values: 80885, 80884, 80883, etc.
-  - Never used in application logic or queries
-
-- **Business Key**: `idturno` (bigint, manually assigned)
-  - Used by all POS applications and business logic
-  - Values like: 894, 893, 892, etc.
-  - Referenced by `tempcheques.idturno` and all related tables
-  - Used in all Entity IDs and synchronization
-
-**Code Implementation**: All database queries in this codebase correctly use `idturno` for business operations, maintaining compatibility
-with SoftRestaurant's application layer.
-
-## Architecture Overview
-
-### Core Components
-
-- **Producer** (`src/components/producer.ts`) - Polls database every 2 seconds, implements 2.5s debouncing for order updates, sends
-  heartbeats every 60 seconds
-- **Commander** (`src/components/commander.ts`) - Consumes commands from `pos_commands_exchange`, executes POS operations through adapters
-- **Configuration Error Consumer** (`src/components/configurationErrorConsumer.ts`) - Handles venue ID validation errors with automatic
-  recovery
-
-### Core Infrastructure
-
-- **Database** (`src/core/db.ts`) - SQL Server 2014 connection pool management with compatibility settings
-- **RabbitMQ** (`src/core/rabbitmq.ts`) - Message broker with exchange binding
-- **Logger** (`src/core/logger.ts`) - Winston with daily rotation and structured logging
-- **Service State Manager** (`src/core/serviceState.ts`) - State machine for service health
-- **Configuration Manager** (`src/core/configurationManager.ts`) - Config validation and backup
-- **Connection Resilience** (`src/core/connectionResilience.ts`) - SQL Server 2014 specific connection handling
-- **Windows Notification** (`src/core/windowsNotification.ts`) - PowerShell-based system notifications
-
-### POS Adapter Pattern
-
-- **IPosAdapter** (`src/adapters/IPosAdapter.ts`) - Interface for POS operations
-- **SoftRestaurant11Adapter** (`src/adapters/SoftRestaurant11Adapter.ts`) - Implementation for SoftRestaurant v11
-  - Order creation and item management
-  - Payment processing and order closure
-  - Shift management (open/close with cash reconciliation)
-  - Transaction-based operations with rollback support
-
-### Configuration Management
-
-- **Development**: Uses `.env` file when `NODE_ENV=development`
-- **Production**: Uses `%ProgramData%\AvoqadoSync\config.json`
-- **Required Fields**: venueId, posType, posVersion, rabbitMqUrl, sqlConfig
-- **SQL Server 2014 Config**: Connection strings must specify compatibility settings for SQL Server 2014
-- **Validation**: Automatic venue ID validation with fallback mechanisms
-- **Backup System**: Maintains configuration history with rollback capability
-- **Multi-tenant**: WorkspaceId configuration for proper data isolation
-
-## SoftRestaurant Entity Resolution System
-
-The service includes intelligent handling for SoftRestaurant's unique order lifecycle where orders are created with `idturno=0` and later
-updated to the real shift ID during payment. This prevents duplicate orders in the backend.
-
-**Key Implementation**:
-
-- **Producer**: Context-aware deletion logic prevents spurious order deletions during shift close
-- **Backend**: Smart entity resolution automatically links orders with different Entity IDs but same folio
-- **Documentation**: See `SOFTRESTAURANT_ENTITY_RESOLUTION.md` for complete technical details
-
-## Key Technical Details
-
-### Producer Architecture
-
-- **Version Detection**: Automatically detects SoftRestaurant version using `parametros2.versiondb` on startup (v2.4.0+)
-- **Polling**: Executes `sp_GetPendingChanges` every 2 seconds with batching (max 100 results)
-- **SQL Server 2014 Compatibility**: Uses T-SQL syntax compatible with version 12.0.4100.1
-- **Debouncing**: Order updates batched for 2.5 seconds to reduce message volume
-- **Event Types**: `created`, `updated`, `deleted` for orders; `created`, `updated`, `deleted` for items
-- **Context-Aware**: Detects shift closures to prevent spurious order deletions
-- **Version-Aware Processing**: Uses detected version to determine Entity ID format (v10 vs v11)
-- **Dual-Key Aware**: Uses `idturno` (business key) for all shift operations, not `idturnointerno` (PK)
-- **Multi-tenant Aware**: Respects WorkspaceId boundaries in v11 databases
-
-### Message Routing
-
-- **Events Published To**: `pos_events_exchange`
-  - `pos.softrestaurant.order.{created|updated|deleted}`
-  - `pos.softrestaurant.orderitem.{created|updated|deleted}`
-  - `pos.softrestaurant.shift.{created|closed}`
-  - `pos.softrestaurant.system.heartbeat`
-- **Commands Consumed From**: `pos_commands_exchange`
-  - `command.softrestaurant.{venueId}` - Regular POS commands
-  - `command.softrestaurant.configuration.error` - Configuration error notifications
-
-### Service State Machine
-
-- **RUNNING** - Normal operation with heartbeats and polling
-- **CONFIGURATION_ERROR** - Invalid venue ID, heartbeats stopped
-- **RECONFIGURING** - Applying new configuration
-- **STOPPED** - Service shutdown or critical error
-
-### Error Handling & Recovery
-
-- **Configuration Errors**: Automatic venue switching with Windows notifications
-- **Database Errors**: Connection pooling with retry logic
-- **RabbitMQ Errors**: Automatic reconnection with exponential backoff
-- **Loop Prevention**: Cooldown periods and maximum retry limits
-
-## Entry Points & Service Management
-
-- **`src/main.ts`** - Windows service installer/uninstaller using node-windows
-- **`src/service.ts`** - Main orchestrator that starts all components
-- **Management Console**: Interactive CLI (development mode only) for real-time monitoring
-
-## Development Patterns
-
-### Adding New POS Adapters
-
-1. Implement `IPosAdapter` interface
-2. Add adapter selection logic in `commander.ts`
-3. Create corresponding SQL triggers and procedures
-4. Update entity ID formats if needed
-
-### Adding New Entity Types
-
-1. Add entity type to `AvoqadoEntityTracking` enum
-2. Create corresponding database triggers
-3. Add processing logic in `producer.ts`
-4. Update message routing keys
-
-### Debugging Database Issues
-
-1. Run `00-Verificacion.sql` for quick status
-2. Use `01-Diagnostico.sql` for detailed analysis
-3. Check logs for trigger execution and SQL errors
-4. Use `04-Pruebas.sql` to validate functionality
-5. Reference `info-soft-rest/` for database schema and SQL traces:
-   - `database-schema/table-definitions.csv` - Complete table list
-   - `database-schema/constraints/foreign-keys.csv` - Relationship mappings
-   - `sql-traces/shift-close-flow.sql` - Real shift close process trace
-
-## Database Performance & Monitoring
-
-- **SQL Server 2014 Optimization**: Queries optimized for version 12.0.4100.1 performance characteristics
-- **Index Usage**: Leverages 366-table schema indexes for optimal query performance
-- **Connection Pooling**: Manages SQL Server 2014 connection limits efficiently
-- **Query Batching**: Limits result sets to prevent memory issues with large datasets
-- **Multi-tenant Isolation**: Ensures WorkspaceId filtering in all database operations
-
-## External Database Access
-
-### Testing & Development Databases
-
-For testing and development, you can access external database instances with different SoftRestaurant versions:
-
-**SoftRestaurant v11 Database (with WorkspaceId)**:
-
-- Server: `100.80.118.68:49759`
-- Instance: `NATIONALSOFT`
-- Database: `avov2`
-- User: `sa`
-- Password: `National09`
-
-**SoftRestaurant v11 Database (without Avoqado integration)**:
-
-- Server: `100.114.70.80:1433`
-- Instance: `NATIONALSOFT`
-- Database: `avo`
-- User: `sa`
-- Password: `National09`
-- Note: Has WorkspaceId support but no Avoqado tracking tables installed
-
-### Connection Methods
-
-**Using sqlcmd for External Databases**:
-
-```bash
-# Set password (Windows PowerShell)
-$env:SQLCMDPASSWORD = 'National09'
-
-# Set password (Linux/macOS/Git Bash)
-export SQLCMDPASSWORD='National09'
-
-# Connect to v11 database (includes port)
-sqlcmd -S "tcp:100.80.118.68,49759" -d avov2 -U sa -Q "SELECT @@SERVERNAME, DB_NAME();"
-
-# Connect to v11 database without Avoqado integration (includes port)
-sqlcmd -S "tcp:100.114.70.80,1433" -d avo -U sa -Q "SELECT @@SERVERNAME, DB_NAME();"
-```
-
-**Note**: Ports are only needed for external database connections via sqlcmd. Local connections use instance names.
-
-### Database Version Detection
-
-To check if a database supports WorkspaceId (v11):
-
-```sql
-SELECT COL_LENGTH('tempcheques', 'WorkspaceId') as HasWorkspaceId;
--- Returns 16 for v11, NULL for v10
-```
-
-### Entity ID Format Analysis
-
-Check Entity ID formats in tracking table:
-
-```sql
-SELECT
-  CASE
-    WHEN EntityId LIKE '%:%:%' THEN 'v10 (InstanceId:IdTurno:Folio)'
-    WHEN EntityId LIKE '%:%' AND EntityId NOT LIKE '%:%:%' THEN 'v11 (WorkspaceId:Sequence)'
-    WHEN EntityId NOT LIKE '%:%' THEN 'v11 (WorkspaceId)'
-    ELSE 'Unknown'
-  END as EntityIDFormat,
-  COUNT(*) as Count
-FROM AvoqadoEntityTracking
-GROUP BY
-  CASE
-    WHEN EntityId LIKE '%:%:%' THEN 'v10 (InstanceId:IdTurno:Folio)'
-    WHEN EntityId LIKE '%:%' AND EntityId NOT LIKE '%:%:%' THEN 'v11 (WorkspaceId:Sequence)'
-    WHEN EntityId NOT LIKE '%:%' THEN 'v11 (WorkspaceId)'
-    ELSE 'Unknown'
-  END;
-```
-
-## Logging & Monitoring
-
-- **Daily Rotation**: Separate files for info and error levels
-- **Structured Logging**: Component-specific prefixes and context
-- **Heartbeat Monitoring**: Regular status reports to central system
-- **Windows Event Log**: Critical errors logged to system event log
-- **Performance Metrics**: Database query times and message processing rates
-- **SQL Server Metrics**: Connection pool status, query execution times, deadlock detection
-
-## 🚨 CRITICAL: Documentation Synchronization Rule
-
-**MANDATORY REQUIREMENT**: Every time ANY change is made to:
-- Database schema (tables, columns, procedures, triggers)
-- Stored procedure signatures or functionality
-- Integration architecture or data flow
-- Entity ID formats or tracking mechanisms
-- Core system behavior or implementation
-
-**MUST IMMEDIATELY UPDATE ALL DOCUMENTATION FILES:**
-- `CLAUDE.md` (primary project documentation)
-- `AGENTS.md` (agent-specific documentation)
-- `docs/SoftRestaurant_Master_Documentation.md` (master reference)
-- Any relevant SQL diagnostic/test scripts
-
-**WHY THIS IS CRITICAL:**
-- Documentation drift leads to confusion and incorrect assumptions
-- Outdated docs can cause developers to implement deprecated patterns
-- Inconsistent documentation wastes debugging time
-- New team members will follow outdated guidance
-
-**PROCESS:**
-1. Make the technical change
-2. IMMEDIATELY update all related documentation
-3. Verify documentation consistency across all files
-4. Test that examples in documentation actually work
-
-**NO EXCEPTIONS**: Documentation updates are NOT optional - they are part of the change implementation.
+- Windows service written in TypeScript/Node.js that syncs SoftRestaurant POS data with the Avoqado platform in near real time.
+- Producer polls the SQL Server 2014 database for changes and publishes events to RabbitMQ; Commander consumes Avoqado commands and applies them to the POS.
+- Supports SoftRestaurant v11 (WorkspaceId) today, with compatibility logic for v10 entity identifiers.
+- Runs as a Windows background service via `node-windows`, but can also run in development mode with hot reload.
+
+## Runtime Architecture
+
+### Service bootstrap
+- `startApp` (`src/service.ts:11`) initializes the logger, loads configuration, connects to SQL Server and RabbitMQ, starts the configuration-error consumer, commander, and producer, and records state transitions in `serviceStateManager`.
+- `shutdown` (`src/service.ts:43`) handles SIGINT/SIGTERM by stopping the management console, producer, configuration-error consumer, updating service state, and closing RabbitMQ/SQL connections before exiting.
+- `src/main.ts:5` installs or removes the Windows service wrapper, and runs `service.js` when launched by the Windows Service Control Manager.
+
+### Producer
+- Heartbeats are emitted by `sendHeartbeat` (`src/components/producer.ts:36`) every 60s when the service is healthy.
+- Order updates are debounced for 2.5s in `debounceAndSendOrderUpdate` (`src/components/producer.ts:71`) to collapse rapid changes into one publish.
+- `pollForChanges` (`src/components/producer.ts:107`) executes `sp_GetPendingChanges`, enriches context (e.g., closed shifts), routes each record to an entity-specific processor, and acknowledges processed IDs through `sp_MarkChangesProcessed`.
+- `processOrderChange` and its v10/v11 helpers (`src/components/producer.ts:331`) construct payloads from `tempcheques`, `tempcheqdet`, related staff/customer data, and guard against false deletes during shift close.
+- `processOrderItemChange` (`src/components/producer.ts:589`) and `processShiftChange` (`src/components/producer.ts:735`) publish order-item and shift events, mapping SoftRestaurant fields to Avoqado schemas.
+- `detectSoftRestaurantVersion` (`src/components/producer.ts:848`) reads `parametros2.versiondb`, stores the result via `updateDetectedVersion`, and `startProducer` (`src/components/producer.ts:953`) launches polling and heartbeat loops while marking the service RUNNING.
+
+### Commander
+- `handleCommand` (`src/components/commander.ts:18`) parses RabbitMQ messages, validates payloads, and dispatches to the POS adapter (`SoftRestaurant11Adapter`) for order, item, payment, and shift operations.
+- `startCommander` (`src/components/commander.ts:134`) binds a venue-specific queue to `pos_commands_exchange` and selects the proper adapter based on `config.posVersion`.
+
+### Configuration error consumer
+- `startConfigurationErrorConsumer` (`src/components/configurationErrorConsumer.ts:179`) creates an instance-specific queue bound to `command.{posType}.configuration.error`.
+- Consecutive configuration errors are tracked; after three strikes, the consumer stops heartbeats, raises Windows notifications, transitions the service into `CONFIGURATION_ERROR`, and persists context for the operator.
+
+### Connection resilience
+- `ConnectionResilienceManager` (`src/core/connectionResilience.ts:7`) runs 30-second health checks, opens a circuit breaker on repeated failures, tears down and rebuilds SQL/RabbitMQ connections, restarts the configuration-error consumer, and restarts the producer when the service should stay RUNNING.
+- `serviceStateManager` (`src/core/serviceState.ts:4`) maintains state history, controls heartbeat eligibility, and exposes helpers for reconfiguration flows.
+
+## Database Contracts
+- Target system is Microsoft SQL Server 2014 Express 32-bit; keep all queries/stored procedures compatible with this version.
+- Core tables: `tempcheques` (active orders), `tempcheqdet` (line items), `tempchequespagos` (payments), `turnos` (shifts), archived counterparts (`cheques`, `cheqdet`, `chequespagos`).
+- Stored procedures: `sp_GetPendingChanges`, `sp_MarkChangesProcessed`, and POS operations invoked by adapters must remain idempotent and performant.
+- Entity IDs: v10 uses `{InstanceId}:{IdTurno}:{Folio}`; v11 uses `WorkspaceId` (plus `:Movimiento` for items). Always treat `turnos.idturno` as the business key, not `idturnointerno`.
+- Shift closure detection relies on `turnos.cierre` updates (see `CLAUDE.md` and `scripts/sql/shift-close-flow` notes). Deletions during archival should not be treated as cancellations.
+
+## Messaging Topology
+- Exchanges: `pos_events_exchange` and `pos_commands_exchange`; dead-letter exchange `dead_letter_exchange` with queue `avoqado_events_dead_letter_queue`.
+- Producer routing keys: `pos.softrestaurant.order.{created|updated|deleted}`, `pos.softrestaurant.orderitem.{created|updated|deleted}`, `pos.softrestaurant.shift.{created|updated|closed}`, `pos.softrestaurant.system.heartbeat`.
+- Commander queue: `commands_queue.venue_{venueId}` bound to `command.softrestaurant.{venueId}`.
+- Configuration error queue: `config_errors_{posType}_{instanceId}` bound to `command.{posType}.configuration.error`.
+
+## Configuration and Secrets
+- Development loads variables from `.env` via `loadConfig` (`src/config.ts:17`). Production reads `%ProgramData%\AvoqadoSync\config.json`.
+- `SecureConfigManager` (`src/core/secureConfig.ts:13`) supports encrypted production configs tied to machine identifiers; use it when hardening deployments.
+- Update `config.detectedVersion` through `updateDetectedVersion` when runtime detection changes POS assumptions.
+- Never hard-code credentials; rely on environment or machine-specific config files.
+
+## Development Workflow
+- Install dependencies: `npm install`.
+- Dev mode: `npm run dev` (nodemon + ts-node on `src/service.ts`).
+- Build: `npm run build` (outputs to `dist/`). Run `npm start` to execute compiled JS.
+- Package: `npm run package` to produce `AvoqadoSyncService.exe` via `pkg`.
+- Formatting: `npm run check-format` / `npm run format`.
+- Prefer built-in helpers (`executeTransaction`, `publishMessage`, `serviceStateManager`) rather than reimplementing infrastructure pieces.
+- Ensure code remains ASCII; only introduce explanatory comments where the flow is non-obvious.
+
+## Windows Service Operations
+- Install service (admin shell): `npm run svc:install`; uninstall: `npm run svc:uninstall`.
+- Service metadata is defined in `src/main.ts:5`. When running as a service, avoid interactive prompts (the management console remains disabled by default).
+
+## Logging and Monitoring
+- `src/core/logger.ts:5` configures console and daily-rotating file transports under `logs/`.
+- Heartbeats double as liveness signals; monitor them downstream.
+- `managementConsole` (`src/core/managementConsole.ts:16`) offers a local CLI in development for state inspection, configuration history, and manual recovery.
+- `npm run monitor` and `npm run monitor:build` execute the SQL monitoring tool (`src/tools/sqlMonitor.ts`) to inspect pending changes and queue health.
+
+## SQL Toolkit
+- `scripts/sql/README-SCRIPTS.md` describes the rollout order: verification, diagnostics, cleanup, installation, testing, fixes.
+- Key scripts (`01-COMPLETE-INSTALL.sql`, `02-TESTING.sql`, `03-DIAGNOSTICS.sql`, etc.) provision triggers, functions, and stored procedures required by the producer.
+- All scripts assume SQL Server 2014 compatibility and the presence of the SoftRestaurant schema documented in `docs/`.
+
+## Documentation Synchronization Rule
+- Any change to database schema, stored procedures, triggers, integration logic, entity IDs, or core runtime behavior must be reflected immediately in **all** related docs: `CLAUDE.md`, `AGENTS.md`, `docs/SoftRestaurant_Master_Documentation.md`, and affected SQL scripts.
+- Verify that examples and queries in the docs still execute successfully after modifications.
+
+## Agent Workflow
+1. **Before coding**
+   - Review the relevant sections of `CLAUDE.md`, this file, and associated SQL scripts.
+   - Identify whether tasks touch the POS data model, messaging topology, or Windows service operations.
+2. **While coding**
+   - Use the planning tool for multi-step efforts; keep plans updated as work progresses.
+   - Always set `workdir` when invoking shell commands; prefer `rg`/`Get-Content` for searches.
+   - Leverage existing utilities (DB helpers, adapters, state manager) instead of bypassing them.
+   - Maintain ASCII output and avoid unnecessary commentary.
+3. **After coding**
+   - Run targeted checks (`npm run build`, `npm run format`, or relevant SQL/unit scripts) as appropriate.
+   - Re-read diffs to ensure no stray credentials, debugging output, or plan remnants remain.
+   - Update all mandated documentation and mention follow-up actions or tests in the final response.
+
+## Troubleshooting
+- **SQL connectivity**: confirm server/instance strings (`localhost\NATIONALSOFT`, escaped backslash, or TCP with port). Use creds defined in config; failures trigger retries in `db.ts`.
+- **RabbitMQ issues**: connection drops cause `connectWithRetry` in `src/core/rabbitmq.ts` to rebuild channels; ensure exchanges/queues remain declared before publishing.
+- **Version detection**: if `parametros2.versiondb` is missing, producer falls back to v10; update the database or handle gracefully in code.
+- **Shift deletions**: if bogus delete events appear, verify `turnos.cierre` timestamps and the archival pipeline (`CLAUDE.md`, `scripts/sql/shift-close-flow`).
+- **Configuration errors**: inspect `logs/error-*.log` and the event history from `serviceStateManager`; use the configuration manager and Windows notifications for recovery.
+
+## Key References
+- `src/service.ts`, `src/main.ts`
+- `src/components/producer.ts`, `commander.ts`, `configurationErrorConsumer.ts`
+- `src/core/db.ts`, `rabbitmq.ts`, `logger.ts`, `serviceState.ts`, `connectionResilience.ts`, `configurationManager.ts`, `windowsNotification.ts`
+- `src/adapters/SoftRestaurant11Adapter.ts`, `src/services/Orders/createEmptyOrder.ts`
+- `CLAUDE.md`, `docs/SoftRestaurant_Master_Documentation.md`, `scripts/sql/README-SCRIPTS.md`

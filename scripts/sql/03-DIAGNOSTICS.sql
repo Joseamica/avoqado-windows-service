@@ -1,13 +1,15 @@
 -- ====================================================================
 -- DIAGNOSTICS - Troubleshooting & Monitoring
 -- ====================================================================
-
-USE avov2;
-GO
+--
+-- USAGE: This script will run on the CURRENT database context.
+-- ====================================================================
 
 PRINT '======================================================================'
 PRINT ' AVOQADO DIAGNOSTICS & MONITORING'
 PRINT '======================================================================'
+PRINT ''
+PRINT 'Diagnosing Database: ' + DB_NAME()
 PRINT ''
 
 -- System Info
@@ -282,6 +284,44 @@ PRINT '💡 Fractional quantities indicate SoftRestaurant-style partial payments
 PRINT '   Example: Quantity 0.9871 = $767 paid on $777 order'
 PRINT ''
 
+PRINT '======================================================================'
+PRINT ' 🧹 MAINTENANCE RECOMMENDATION'
+PRINT '======================================================================'
+PRINT ''
+
+-- Check if cleanup is needed
+DECLARE @OldProcessed INT, @OldErrors INT, @OldFailed INT
+SELECT @OldProcessed = COUNT(*)
+FROM AvoqadoTracking
+WHERE ProcessedAt IS NOT NULL
+  AND ProcessedAt < DATEADD(DAY, -7, GETUTCDATE())
+
+SELECT @OldErrors = COUNT(*)
+FROM AvoqadoTracking
+WHERE RetryCount = 99
+  AND Operation = 'ERROR'
+  AND Timestamp < DATEADD(DAY, -7, GETUTCDATE())
+
+SELECT @OldFailed = COUNT(*)
+FROM AvoqadoTracking
+WHERE RetryCount >= 5
+  AND RetryCount < 99
+  AND Timestamp < DATEADD(DAY, -7, GETUTCDATE())
+
+IF @OldProcessed > 0 OR @OldErrors > 0 OR @OldFailed > 0
+BEGIN
+    PRINT '⚠️ Old records found that can be cleaned up:'
+    PRINT '   Processed records (>7 days): ' + CAST(@OldProcessed AS VARCHAR)
+    PRINT '   Trigger errors (>7 days): ' + CAST(@OldErrors AS VARCHAR)
+    PRINT '   Failed records (>7 days): ' + CAST(@OldFailed AS VARCHAR)
+    PRINT ''
+    PRINT '💡 Run cleanup:'
+    PRINT '   EXEC sp_CleanupOldTrackingRecords @DaysToKeep = 7'
+END
+ELSE
+    PRINT '✅ No old records to clean up'
+
+PRINT ''
 PRINT '======================================================================'
 PRINT ' DIAGNOSTICS COMPLETE'
 PRINT '======================================================================'

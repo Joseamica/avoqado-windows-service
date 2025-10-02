@@ -1,13 +1,15 @@
 -- ====================================================================
 -- TESTING SCRIPT - Test Avoqado Integration
 -- ====================================================================
-
-USE avov2;
-GO
+--
+-- USAGE: This script will run on the CURRENT database context.
+-- ====================================================================
 
 PRINT '======================================================================'
 PRINT ' AVOQADO INTEGRATION TESTING'
 PRINT '======================================================================'
+PRINT ''
+PRINT 'Testing Database: ' + DB_NAME()
 PRINT ''
 
 -- Test 1: Test sp_GetPendingChanges

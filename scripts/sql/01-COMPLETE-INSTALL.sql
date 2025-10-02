@@ -3,15 +3,18 @@
 -- Includes: Base + NULL Fix + SQL 2014 Fix + Payment Methods
 -- SQL Server 2014 Compatible
 -- ====================================================================
-
-USE avov2;
-GO
+--
+-- USAGE: This script will run on the CURRENT database context.
+--        Make sure you're connected to the correct database before running!
+--        Example: USE your_database_name; GO
+-- ====================================================================
 
 PRINT '======================================================================'
 PRINT ' COMPLETE AVOQADO INSTALLATION - ALL IN ONE'
 PRINT ' Includes: Tables, Functions, Procedures, Triggers, Payment Methods'
 PRINT '======================================================================'
 PRINT ''
+PRINT 'Current Database: ' + DB_NAME()
 PRINT 'Installation started at: ' + CONVERT(VARCHAR, GETDATE(), 120)
 PRINT ''
 
@@ -216,6 +219,46 @@ CREATE TABLE AvoqadoCommands (
 CREATE INDEX IX_Commands_Pending ON AvoqadoCommands(Status, ReceivedAt)
 PRINT '  ✅ Created AvoqadoCommands'
 
+IF OBJECT_ID('AvoqadoDebugLog', 'U') IS NOT NULL DROP TABLE AvoqadoDebugLog
+CREATE TABLE AvoqadoDebugLog (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    Folio BIGINT NULL,
+    PaymentAmount MONEY NULL,
+    TipAmount MONEY NULL,
+    PaymentMethod VARCHAR(50) NULL,
+    Reference VARCHAR(255) NULL,
+    Message NVARCHAR(MAX) NULL,
+    Timestamp DATETIME2 DEFAULT GETUTCDATE()
+)
+CREATE INDEX IX_DebugLog_Timestamp ON AvoqadoDebugLog(Timestamp DESC)
+PRINT '  ✅ Created AvoqadoDebugLog'
+
+IF OBJECT_ID('AvoqadoPartialPayments', 'U') IS NOT NULL DROP TABLE AvoqadoPartialPayments
+CREATE TABLE AvoqadoPartialPayments (
+    Id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    Folio BIGINT NOT NULL,
+    Amount MONEY NOT NULL,
+    TipAmount MONEY DEFAULT 0,
+    PaymentMethodId VARCHAR(50) NOT NULL,
+    Reference VARCHAR(255) NULL,
+    CreatedAt DATETIME2 DEFAULT GETUTCDATE(),
+    IsProcessed BIT DEFAULT 0,
+    ProcessedAt DATETIME2 NULL
+)
+CREATE INDEX IX_PartialPayments_Folio ON AvoqadoPartialPayments(Folio, IsProcessed)
+CREATE INDEX IX_PartialPayments_Processed ON AvoqadoPartialPayments(IsProcessed, CreatedAt)
+PRINT '  ✅ Created AvoqadoPartialPayments'
+
+IF OBJECT_ID('AvoqadoShiftArchiving', 'U') IS NOT NULL DROP TABLE AvoqadoShiftArchiving
+CREATE TABLE AvoqadoShiftArchiving (
+    IdTurno BIGINT PRIMARY KEY,
+    IsArchiving BIT DEFAULT 1,
+    StartedAt DATETIME2 DEFAULT GETUTCDATE(),
+    CompletedAt DATETIME2 NULL
+)
+CREATE INDEX IX_ShiftArchiving_Active ON AvoqadoShiftArchiving(IsArchiving, StartedAt) WHERE IsArchiving = 1
+PRINT '  ✅ Created AvoqadoShiftArchiving'
+
 PRINT ''
 
 -- =====================================================
@@ -243,21 +286,22 @@ AS BEGIN
     BEGIN
         IF @WorkspaceId IS NULL
         BEGIN
+            -- 🔧 FIX: Get WorkspaceId from the CORRECT table for each entity type
             IF @EntityType = 'shift'
                 SELECT @WorkspaceId = WorkspaceId FROM turnos WHERE idturno = @IdTurno
+            ELSE IF @EntityType = 'orderitem'
+                SELECT @WorkspaceId = WorkspaceId FROM tempcheqdet WHERE foliodet = @Folio AND movimiento = @Movimiento
+            ELSE IF @EntityType = 'payment'
+                SELECT TOP 1 @WorkspaceId = WorkspaceId FROM tempchequespagos WHERE folio = @Folio ORDER BY WorkspaceId DESC
             ELSE
                 SELECT @WorkspaceId = WorkspaceId FROM tempcheques WHERE folio = @Folio
         END
 
         IF @WorkspaceId IS NOT NULL
         BEGIN
-            SET @EntityId = CASE @EntityType
-                WHEN 'order' THEN CAST(@WorkspaceId AS VARCHAR(36))
-                WHEN 'orderitem' THEN CAST(@WorkspaceId AS VARCHAR(36)) + ':' + CAST(@Movimiento AS VARCHAR)
-                WHEN 'shift' THEN CAST(@WorkspaceId AS VARCHAR(36))
-                WHEN 'payment' THEN CAST(@WorkspaceId AS VARCHAR(36)) + ':PAY'
-                ELSE CAST(@InstanceId AS VARCHAR(36)) + ':' + CAST(@Folio AS VARCHAR)
-            END
+            -- 🔧 FIX: For v11, Entity ID is JUST the WorkspaceId (no suffixes!)
+            -- Each entity has its own unique WorkspaceId
+            SET @EntityId = CAST(@WorkspaceId AS VARCHAR(36))
         END
         ELSE
         BEGIN
@@ -343,9 +387,36 @@ AS BEGIN
             RETURN
         END
 
-        DECLARE @OrderTotal MONEY, @PaidSoFar MONEY, @CurrentObservaciones VARCHAR(250), @WorkspaceId UNIQUEIDENTIFIER
-        SELECT @OrderTotal = total, @CurrentObservaciones = ISNULL(observaciones, ''), @WorkspaceId = WorkspaceId
+        DECLARE @OrderTotal MONEY, @PaidSoFar MONEY, @CurrentObservaciones VARCHAR(250), @WorkspaceId UNIQUEIDENTIFIER, @CurrentIdTurno BIGINT
+        DECLARE @OriginalSubtotal MONEY, @OriginalTax MONEY
+        SELECT @OrderTotal = total, @CurrentObservaciones = ISNULL(observaciones, ''), @WorkspaceId = WorkspaceId, @CurrentIdTurno = idturno,
+               @OriginalSubtotal = subtotal, @OriginalTax = totalimpuesto1
         FROM tempcheques WHERE folio = @Folio
+
+        -- 🔧 CRITICAL FIX: If order has idturno=0, assign it to current open shift
+        -- This ensures the order appears in shift reports (corte de caja X)
+        IF @CurrentIdTurno = 0
+        BEGIN
+            DECLARE @OpenShiftId BIGINT
+            SELECT @OpenShiftId = idturno FROM turnos WHERE cierre IS NULL
+
+            IF @OpenShiftId IS NULL
+            BEGIN
+                SET @Success = 0
+                SET @Message = 'ERROR: No open shift found. Cannot apply payment.'
+                SET @Remaining = 0
+                INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
+                VALUES (@Folio, @PaymentAmount, 'ERROR: No open shift found')
+                ROLLBACK
+                RETURN
+            END
+
+            -- Update order to current open shift
+            UPDATE tempcheques SET idturno = @OpenShiftId WHERE folio = @Folio
+
+            INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
+            VALUES (@Folio, @PaymentAmount, 'Order assigned to shift ' + CAST(@OpenShiftId AS VARCHAR))
+        END
 
         SELECT @PaidSoFar = ISNULL(SUM(importe), 0) FROM tempchequespagos WHERE folio = @Folio
         SET @Remaining = @OrderTotal - (@PaidSoFar + @PaymentAmount)
@@ -358,9 +429,10 @@ AS BEGIN
                 ', Remaining=' + CAST(@Remaining AS VARCHAR))
 
         -- ALWAYS insert payment record (critical for shift reports)
-        -- IMPORTANT: Each payment gets unique WorkspaceId (SoftRestaurant native behavior)
+        -- CRITICAL FIX: Use order's WorkspaceId (not NEWID) to ensure archiving works correctly
+        -- CRITICAL FIX: Use @PaymentMethod parameter (not hardcoded 'ACASH')
         INSERT INTO tempchequespagos (folio, idformadepago, importe, propina, referencia, tipodecambio, WorkspaceId)
-        VALUES (@Folio, 'ACASH', @PaymentAmount, @TipAmount, @Reference, 1, NEWID())
+        VALUES (@Folio, @PaymentMethod, @PaymentAmount, @TipAmount, @Reference, 1, @WorkspaceId)
 
         -- 🔍 DEBUG: Confirm insert
         INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
@@ -393,25 +465,28 @@ AS BEGIN
             VALUES (@Folio, @PaymentAmount, 'PARTIAL PAYMENT PATH: Remaining=' + CAST(@Remaining AS VARCHAR))
 
             -- PARTIAL PAYMENT: Adjust item quantities proportionally (SoftRestaurant native way)
-            DECLARE @RemainingRatio DECIMAL(10,6) = @Remaining / @OrderTotal
+            -- CRITICAL FIX: Use high precision DECIMAL to prevent rounding errors
+            DECLARE @RemainingRatio DECIMAL(38,10) = CAST(@Remaining AS DECIMAL(38,10)) / CAST(@OrderTotal AS DECIMAL(38,10))
 
             -- 🔍 DEBUG: Show ratio calculation
             INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
             VALUES (@Folio, @PaymentAmount, 'Ratio calculation: ' + CAST(@Remaining AS VARCHAR) + ' / ' + CAST(@OrderTotal AS VARCHAR) + ' = ' + CAST(@RemainingRatio AS VARCHAR))
 
             -- Update item quantities to reflect remaining amount (like SoftRestaurant split bill)
+            -- Use DECIMAL(38,10) for maximum precision
             UPDATE tempcheqdet
-            SET cantidad = CAST(cantidad * @RemainingRatio AS DECIMAL(10,4))
+            SET cantidad = CAST(CAST(cantidad AS DECIMAL(38,10)) * @RemainingRatio AS DECIMAL(18,6))
             WHERE foliodet = @Folio
 
             -- 🔍 DEBUG: After quantity update
             INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
             VALUES (@Folio, @PaymentAmount, 'Item quantities updated, rows affected: ' + CAST(@@ROWCOUNT AS VARCHAR))
 
-            -- Recalculate order totals from updated quantities
-            DECLARE @NewSubtotal MONEY = @Remaining / 1.16
-            DECLARE @NewTax MONEY = @Remaining - (@Remaining / 1.16)
-            DECLARE @PaymentNote VARCHAR(50) = 'Pago: $' + CAST(CAST(@PaymentAmount AS INT) AS VARCHAR) + ' (ACASH)'
+            -- CRITICAL FIX: Calculate new subtotal/tax proportionally from ORIGINAL values
+            -- This ensures subtotal + tax = total EXACTLY (no division rounding errors)
+            DECLARE @NewSubtotal MONEY = ROUND(CAST(@OriginalSubtotal AS DECIMAL(38,10)) * @RemainingRatio, 2)
+            DECLARE @NewTax MONEY = @Remaining - @NewSubtotal
+            DECLARE @PaymentNote VARCHAR(50) = 'Pago: $' + CAST(CAST(@PaymentAmount AS INT) AS VARCHAR) + ' (' + @PaymentMethod + ')'
 
             UPDATE tempcheques
             SET total = @Remaining,
@@ -468,6 +543,72 @@ END
 GO
 PRINT '  ✅ Created sp_ApplyPartialPayment'
 
+-- sp_BeginShiftArchiving - Mark shift as being archived
+IF OBJECT_ID('sp_BeginShiftArchiving', 'P') IS NOT NULL DROP PROCEDURE sp_BeginShiftArchiving
+GO
+CREATE PROCEDURE sp_BeginShiftArchiving @IdTurno BIGINT
+AS BEGIN
+    SET NOCOUNT ON
+    -- Insert or update archiving record
+    IF EXISTS(SELECT 1 FROM AvoqadoShiftArchiving WHERE IdTurno = @IdTurno)
+        UPDATE AvoqadoShiftArchiving SET IsArchiving = 1, StartedAt = GETUTCDATE(), CompletedAt = NULL WHERE IdTurno = @IdTurno
+    ELSE
+        INSERT INTO AvoqadoShiftArchiving (IdTurno, IsArchiving) VALUES (@IdTurno, 1)
+END
+GO
+PRINT '  ✅ Created sp_BeginShiftArchiving'
+
+-- sp_EndShiftArchiving - Mark shift archiving as complete
+IF OBJECT_ID('sp_EndShiftArchiving', 'P') IS NOT NULL DROP PROCEDURE sp_EndShiftArchiving
+GO
+CREATE PROCEDURE sp_EndShiftArchiving @IdTurno BIGINT
+AS BEGIN
+    SET NOCOUNT ON
+    UPDATE AvoqadoShiftArchiving SET IsArchiving = 0, CompletedAt = GETUTCDATE() WHERE IdTurno = @IdTurno
+    -- Clean up old archiving records (>7 days)
+    DELETE FROM AvoqadoShiftArchiving WHERE CompletedAt < DATEADD(DAY, -7, GETUTCDATE())
+END
+GO
+PRINT '  ✅ Created sp_EndShiftArchiving'
+
+-- sp_CleanupOldTrackingRecords - Clean up old processed and error records
+IF OBJECT_ID('sp_CleanupOldTrackingRecords', 'P') IS NOT NULL DROP PROCEDURE sp_CleanupOldTrackingRecords
+GO
+CREATE PROCEDURE sp_CleanupOldTrackingRecords @DaysToKeep INT = 7
+AS BEGIN
+    SET NOCOUNT ON
+    DECLARE @CutoffDate DATETIME2 = DATEADD(DAY, -@DaysToKeep, GETUTCDATE())
+    DECLARE @DeletedCount INT = 0
+
+    -- Delete old processed records
+    DELETE FROM AvoqadoTracking
+    WHERE ProcessedAt IS NOT NULL
+      AND ProcessedAt < @CutoffDate
+
+    SET @DeletedCount = @@ROWCOUNT
+    PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old processed records'
+
+    -- Delete old trigger errors (RetryCount=99)
+    DELETE FROM AvoqadoTracking
+    WHERE RetryCount = 99
+      AND Operation = 'ERROR'
+      AND Timestamp < @CutoffDate
+
+    SET @DeletedCount = @@ROWCOUNT
+    PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old trigger error records'
+
+    -- Delete old failed records (RetryCount >= 5, but not trigger errors)
+    DELETE FROM AvoqadoTracking
+    WHERE RetryCount >= 5
+      AND RetryCount < 99
+      AND Timestamp < @CutoffDate
+
+    SET @DeletedCount = @@ROWCOUNT
+    PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old failed records'
+END
+GO
+PRINT '  ✅ Created sp_CleanupOldTrackingRecords'
+
 PRINT ''
 
 -- =====================================================
@@ -481,7 +622,20 @@ GO
 CREATE TRIGGER Trg_Avoqado_Orders ON tempcheques AFTER INSERT, UPDATE, DELETE AS
 BEGIN
     SET NOCOUNT ON
-    IF EXISTS(SELECT 1 FROM turnos t WHERE t.cierre IS NOT NULL AND t.idturno IN (SELECT idturno FROM inserted UNION SELECT idturno FROM deleted) AND DATEDIFF(SECOND, t.cierre, GETDATE()) < 30) RETURN
+    -- ✅ IMPROVED: Use flag instead of time window (more reliable for large shifts)
+    IF EXISTS(
+        SELECT 1 FROM AvoqadoShiftArchiving a
+        WHERE a.IsArchiving = 1
+        AND a.IdTurno IN (SELECT idturno FROM inserted UNION SELECT idturno FROM deleted)
+    ) RETURN
+
+    -- Fallback: Also check recent shift closes (for backwards compatibility)
+    IF EXISTS(
+        SELECT 1 FROM turnos t
+        WHERE t.cierre IS NOT NULL
+        AND t.idturno IN (SELECT idturno FROM inserted UNION SELECT idturno FROM deleted)
+        AND DATEDIFF(SECOND, t.cierre, GETDATE()) < 30
+    ) RETURN
 
     BEGIN TRY
         INSERT INTO AvoqadoTracking (EntityType, EntityId, Operation, RetryCount)
@@ -517,6 +671,23 @@ GO
 CREATE TRIGGER Trg_Avoqado_OrderItems ON tempcheqdet AFTER INSERT, UPDATE, DELETE AS
 BEGIN
     SET NOCOUNT ON
+
+    -- ✅ CRITICAL: Shift close protection - prevent spurious DELETE events during shift archiving
+    IF EXISTS(
+        SELECT 1 FROM AvoqadoShiftArchiving a
+        INNER JOIN tempcheques t ON a.IdTurno = t.idturno
+        WHERE a.IsArchiving = 1
+        AND t.folio IN (SELECT foliodet FROM inserted UNION SELECT foliodet FROM deleted)
+    ) RETURN
+
+    -- Fallback: Also check recent shift closes (for backwards compatibility)
+    IF EXISTS(
+        SELECT 1 FROM turnos tur
+        INNER JOIN tempcheques t ON tur.idturno = t.idturno
+        WHERE tur.cierre IS NOT NULL
+        AND t.folio IN (SELECT foliodet FROM inserted UNION SELECT foliodet FROM deleted)
+        AND DATEDIFF(SECOND, tur.cierre, GETDATE()) < 30
+    ) RETURN
 
     BEGIN TRY
         INSERT INTO AvoqadoTracking (EntityType, EntityId, Operation, RetryCount)
@@ -557,6 +728,23 @@ GO
 CREATE TRIGGER Trg_Avoqado_Payments ON tempchequespagos AFTER INSERT, UPDATE, DELETE AS
 BEGIN
     SET NOCOUNT ON
+
+    -- ✅ CRITICAL: Shift close protection - prevent spurious DELETE events during shift archiving
+    IF EXISTS(
+        SELECT 1 FROM AvoqadoShiftArchiving a
+        INNER JOIN tempcheques t ON a.IdTurno = t.idturno
+        WHERE a.IsArchiving = 1
+        AND t.folio IN (SELECT folio FROM inserted UNION SELECT folio FROM deleted)
+    ) RETURN
+
+    -- Fallback: Also check recent shift closes (for backwards compatibility)
+    IF EXISTS(
+        SELECT 1 FROM turnos tur
+        INNER JOIN tempcheques t ON tur.idturno = t.idturno
+        WHERE tur.cierre IS NOT NULL
+        AND t.folio IN (SELECT folio FROM inserted UNION SELECT folio FROM deleted)
+        AND DATEDIFF(SECOND, tur.cierre, GETDATE()) < 30
+    ) RETURN
 
     BEGIN TRY
         INSERT INTO AvoqadoTracking (EntityType, EntityId, Operation, RetryCount)
@@ -638,11 +826,29 @@ PRINT ''
 PRINT 'Installed:'
 PRINT '  ✅ Payment methods (ACASH, ACARD)'
 PRINT '  ✅ Test product (AVOTEST - hidden from POS)'
-PRINT '  ✅ SQL Server 2014 compatibility'
-PRINT '  ✅ Core tables (Config, Tracking, Commands, InstanceInfo)'
+PRINT '  ✅ SQL Server 2014 compatibility (fn_SplitString)'
+PRINT '  ✅ Core tables (Config, Tracking, Commands, InstanceInfo, DebugLog, PartialPayments, ShiftArchiving)'
 PRINT '  ✅ Entity ID function (with NULL fix)'
-PRINT '  ✅ Stored procedures (with partial payment logic)'
-PRINT '  ✅ Triggers (with NULL fix for DELETE operations)'
+PRINT '  ✅ Stored procedures (with partial payment logic and shift archiving)'
+PRINT '  ✅ Triggers (with improved shift close protection)'
 PRINT ''
 PRINT 'Completed at: ' + CONVERT(VARCHAR, GETDATE(), 120)
+PRINT ''
+PRINT '======================================================================'
+PRINT ' 📋 MAINTENANCE RECOMMENDATIONS'
+PRINT '======================================================================'
+PRINT ''
+PRINT '1. Regular Cleanup (Run weekly):'
+PRINT '   EXEC sp_CleanupOldTrackingRecords @DaysToKeep = 7'
+PRINT ''
+PRINT '2. Shift Close Process (from POS application):'
+PRINT '   -- Before closing shift:'
+PRINT '   EXEC sp_BeginShiftArchiving @IdTurno = {shift_id}'
+PRINT '   -- ... do normal shift close archiving ...'
+PRINT '   -- After closing shift:'
+PRINT '   EXEC sp_EndShiftArchiving @IdTurno = {shift_id}'
+PRINT ''
+PRINT '3. Monitor Health:'
+PRINT '   Run: 03-DIAGNOSTICS.sql'
+PRINT ''
 PRINT '======================================================================'

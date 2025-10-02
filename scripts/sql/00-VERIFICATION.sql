@@ -2,13 +2,15 @@
 -- AVOQADO INSTALLATION VERIFICATION
 -- Checks all required objects exist and are configured correctly
 -- ====================================================================
-
-USE avov2;
-GO
+--
+-- USAGE: This script will run on the CURRENT database context.
+-- ====================================================================
 
 PRINT '======================================================================'
 PRINT ' AVOQADO INSTALLATION VERIFICATION'
 PRINT '======================================================================'
+PRINT ''
+PRINT 'Verifying Database: ' + DB_NAME()
 PRINT ''
 
 -- Check SoftRestaurant version
@@ -63,6 +65,37 @@ IF OBJECT_ID('AvoqadoCommands', 'U') IS NOT NULL
 ELSE
     PRINT '  ❌ AvoqadoCommands - MISSING'
 
+IF OBJECT_ID('AvoqadoDebugLog', 'U') IS NOT NULL
+    PRINT '  ✅ AvoqadoDebugLog'
+ELSE
+    PRINT '  ❌ AvoqadoDebugLog - MISSING'
+
+IF OBJECT_ID('AvoqadoPartialPayments', 'U') IS NOT NULL
+BEGIN
+    PRINT '  ✅ AvoqadoPartialPayments'
+
+    -- Check structure
+    IF COL_LENGTH('AvoqadoPartialPayments', 'IsProcessed') IS NOT NULL
+        PRINT '      ✅ Has IsProcessed column'
+    ELSE
+        PRINT '      ❌ Missing IsProcessed column'
+END
+ELSE
+    PRINT '  ❌ AvoqadoPartialPayments - MISSING'
+
+IF OBJECT_ID('AvoqadoShiftArchiving', 'U') IS NOT NULL
+BEGIN
+    PRINT '  ✅ AvoqadoShiftArchiving'
+
+    -- Check structure
+    IF COL_LENGTH('AvoqadoShiftArchiving', 'IsArchiving') IS NOT NULL
+        PRINT '      ✅ Has IsArchiving column'
+    ELSE
+        PRINT '      ❌ Missing IsArchiving column'
+END
+ELSE
+    PRINT '  ❌ AvoqadoShiftArchiving - MISSING'
+
 PRINT ''
 PRINT '📦 STORED PROCEDURES:'
 IF OBJECT_ID('sp_GetPendingChanges', 'P') IS NOT NULL
@@ -80,6 +113,21 @@ IF OBJECT_ID('sp_ApplyPartialPayment', 'P') IS NOT NULL
 ELSE
     PRINT '  ❌ sp_ApplyPartialPayment - MISSING'
 
+IF OBJECT_ID('sp_BeginShiftArchiving', 'P') IS NOT NULL
+    PRINT '  ✅ sp_BeginShiftArchiving'
+ELSE
+    PRINT '  ❌ sp_BeginShiftArchiving - MISSING'
+
+IF OBJECT_ID('sp_EndShiftArchiving', 'P') IS NOT NULL
+    PRINT '  ✅ sp_EndShiftArchiving'
+ELSE
+    PRINT '  ❌ sp_EndShiftArchiving - MISSING'
+
+IF OBJECT_ID('sp_CleanupOldTrackingRecords', 'P') IS NOT NULL
+    PRINT '  ✅ sp_CleanupOldTrackingRecords'
+ELSE
+    PRINT '  ❌ sp_CleanupOldTrackingRecords - MISSING'
+
 PRINT ''
 PRINT '⚙️ FUNCTIONS:'
 IF OBJECT_ID('fn_GetAvoqadoEntityId', 'FN') IS NOT NULL
@@ -89,7 +137,7 @@ ELSE IF OBJECT_ID('fn_GetAvoqadoEntityIdWithWorkspace', 'FN') IS NOT NULL
 ELSE
     PRINT '  ❌ Entity ID function - MISSING'
 
-IF OBJECT_ID('fn_SplitString', 'FN') IS NOT NULL
+IF OBJECT_ID('fn_SplitString', 'TF') IS NOT NULL OR OBJECT_ID('fn_SplitString', 'FN') IS NOT NULL
     PRINT '  ✅ fn_SplitString (SQL 2014 compatible)'
 ELSE
     PRINT '  ⚠️ fn_SplitString - MISSING (needed for SQL 2014)'
@@ -97,22 +145,54 @@ ELSE
 PRINT ''
 PRINT '🔔 TRIGGERS:'
 IF OBJECT_ID('Trg_Avoqado_Orders', 'TR') IS NOT NULL
+BEGIN
     PRINT '  ✅ Trg_Avoqado_Orders'
+    DECLARE @OrdersTriggerDisabled BIT
+    SELECT @OrdersTriggerDisabled = is_disabled FROM sys.triggers WHERE name = 'Trg_Avoqado_Orders'
+    IF @OrdersTriggerDisabled = 0
+        PRINT '      ✅ ENABLED'
+    ELSE
+        PRINT '      ⚠️ DISABLED - Trigger will not fire!'
+END
 ELSE
     PRINT '  ❌ Trg_Avoqado_Orders - MISSING'
 
 IF OBJECT_ID('Trg_Avoqado_OrderItems', 'TR') IS NOT NULL
+BEGIN
     PRINT '  ✅ Trg_Avoqado_OrderItems'
+    DECLARE @ItemsTriggerDisabled BIT
+    SELECT @ItemsTriggerDisabled = is_disabled FROM sys.triggers WHERE name = 'Trg_Avoqado_OrderItems'
+    IF @ItemsTriggerDisabled = 0
+        PRINT '      ✅ ENABLED'
+    ELSE
+        PRINT '      ⚠️ DISABLED - Trigger will not fire!'
+END
 ELSE
     PRINT '  ❌ Trg_Avoqado_OrderItems - MISSING'
 
 IF OBJECT_ID('Trg_Avoqado_Payments', 'TR') IS NOT NULL
+BEGIN
     PRINT '  ✅ Trg_Avoqado_Payments'
+    DECLARE @PaymentsTriggerDisabled BIT
+    SELECT @PaymentsTriggerDisabled = is_disabled FROM sys.triggers WHERE name = 'Trg_Avoqado_Payments'
+    IF @PaymentsTriggerDisabled = 0
+        PRINT '      ✅ ENABLED'
+    ELSE
+        PRINT '      ⚠️ DISABLED - Trigger will not fire!'
+END
 ELSE
     PRINT '  ❌ Trg_Avoqado_Payments - MISSING'
 
 IF OBJECT_ID('Trg_Avoqado_Shifts', 'TR') IS NOT NULL
+BEGIN
     PRINT '  ✅ Trg_Avoqado_Shifts'
+    DECLARE @ShiftsTriggerDisabled BIT
+    SELECT @ShiftsTriggerDisabled = is_disabled FROM sys.triggers WHERE name = 'Trg_Avoqado_Shifts'
+    IF @ShiftsTriggerDisabled = 0
+        PRINT '      ✅ ENABLED'
+    ELSE
+        PRINT '      ⚠️ DISABLED - Trigger will not fire!'
+END
 ELSE
     PRINT '  ❌ Trg_Avoqado_Shifts - MISSING'
 
