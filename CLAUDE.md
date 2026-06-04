@@ -365,3 +365,14 @@ The service includes intelligent handling for SoftRestaurant's unique order life
 - **Windows Event Log**: Critical errors logged to system event log
 - **Performance Metrics**: Database query times and message processing rates
 - **SQL Server Metrics**: Connection pool status, query execution times, deadlock detection
+## 🔴 CRITICAL — Keep the Avoqado MCP in sync
+
+The Avoqado MCP (`avoqado-server/scripts/mcp/`) is a **first-class interface**: it exposes
+the platform's data and actions to AI agents (internal ops today, customer-facing tomorrow).
+It must never fall behind the platform.
+
+**Whenever you add or change a feature, Prisma model, service, endpoint, permission, or any
+capability the MCP should expose, you MUST add or update the matching MCP tool in
+`avoqado-server/scripts/mcp/` as part of the SAME change — never "later".** A capability that
+exists but isn't reachable through the MCP is unfinished. Treat the MCP like permissions: kept
+in lockstep, never an afterthought.
