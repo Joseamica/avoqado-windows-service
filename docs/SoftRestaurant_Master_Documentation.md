@@ -93,7 +93,7 @@ This master documentation serves as the central reference for understanding Soft
   - `Trg_Avoqado_Shifts.sql` - Shift tracking
 
 - **Tables**:
-  - `AvoqadoEntityTracking` - Change tracking
+  - `AvoqadoTracking` - Change tracking
   - `AvoqadoPartialPayments` - Partial payment management
   - `AvoqadoInstanceInfo` - Instance information
 
@@ -178,7 +178,7 @@ Handles SoftRestaurant's unique behavior:
 - **`parametros3`** - Additional features
 
 #### Integration Tables:
-- **`AvoqadoEntityTracking`** - Change tracking
+- **`AvoqadoTracking`** - Change tracking
 - **`AvoqadoPartialPayments`** - Partial payments
 - **`AvoqadoInstanceInfo`** - Instance management
 

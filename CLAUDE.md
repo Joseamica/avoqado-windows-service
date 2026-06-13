@@ -405,7 +405,7 @@ The system maintains data integrity through **189 foreign key relationships**:
 
 ### Avoqado Integration Role:
 
-- **Triggers**: Act as "microphones" on temp\* tables, reporting changes to `AvoqadoEntityTracking`
+- **Triggers**: Act as "microphones" on temp\* tables, reporting changes to `AvoqadoTracking`
 - **Producer**: Intelligent debouncing, understands DELETE during shift close ≠ cancellation
 - **Context-Aware**: Detects `turnos.cierre` updates to identify legitimate shift closures
 - **Timing Intelligence**: Uses shift close timestamp detection to prevent spurious deletion events
@@ -453,12 +453,13 @@ transactional lifecycle.
    - Compares temp\* table data with archived data
    - **Usage**: Run BEFORE and AFTER shift close to diagnose archiving issues
 
-#### Performance & Concurrency Upgrade (v2.3)
+#### Maintenance & Tracking Cleanup
 
-- **Tracking Optimization** - Performance & concurrency upgrade introduced in v2.3: polling index,
-  set-based triggers (no cursors), race-safe upserts, composite cursor `(LastModifiedAt, Id)`, and
-  `sp_PurgeAvoqadoTracking`. **Must be applied BEFORE deploying service v2.3+** (the new Producer passes
-  `@lastSyncId`). These optimizations are consolidated into `01-COMPLETE-INSTALL.sql`.
+- **Tracking maintenance** is handled by `sp_CleanupOldTrackingRecords` (see Stored Procedures below),
+  which prunes old processed/error rows from `AvoqadoTracking`. There is no separate optimization
+  script to apply: `scripts/sql/05-Optimizacion-Tracking.sql` is **deprecated** (moved to
+  `scripts/sql/[deprecated]/`) and is NOT part of the canonical model. All required objects are
+  consolidated into `01-COMPLETE-INSTALL.sql`.
 
 ### Database Architecture
 
@@ -560,14 +561,8 @@ The service integrates with existing POS tables through trigger-based change tra
 
 **Sync Operations:**
 
-- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (batched, max 100)
-- **`sp_MarkChangesProcessed`** - Marks changes as processed after successful sync
-- **`sp_TrackEntityChange`** - Records entity changes with timestamps and reasons (race-safe upsert since v2.3)
-- **`sp_GetEntityChanges`** - Retrieves pending changes since last sync (batched, max 100). Since v2.3 uses a
-  composite cursor `(@lastSyncTimestamp, @lastSyncId)` and returns `Id`; `@lastSyncId` defaults to BIGINT MAX
-  so pre-v2.3 services keep their exact old semantics
-- **`sp_UpdateEntitySnapshot`** - Updates content hash snapshots (v1 only)
-- **`sp_CleanupStuckTracking`** - Maintenance procedure for stuck records (v1 only)
+- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (reads `WHERE ProcessedAt IS NULL`, batched, max 100)
+- **`sp_MarkChangesProcessed`** - Marks changes as processed (sets `ProcessedAt`) after successful sync
 
 **Payment Operations:**
 
@@ -582,12 +577,10 @@ The service integrates with existing POS tables through trigger-based change tra
 
 **Maintenance (v2.5.0):**
 
-- **`sp_CleanupOldTrackingRecords`** ✅ - Automated cleanup of old processed/error records
-  - Deletes processed records older than X days (default: 7)
-  - Deletes trigger errors (RetryCount=99) older than X days
-  - Deletes failed records (RetryCount>=5) older than X days
-- **`sp_PurgeAvoqadoTracking`** - Daily purge of tracking rows untouched for N days (default 30); invoked by
-  the Producer once a day because SQL Express has no SQL Agent (v2.3+)
+- **`sp_CleanupOldTrackingRecords`** ✅ - Automated cleanup of old processed/error records (`@DaysToKeep INT = 7`)
+  - Deletes processed records older than @DaysToKeep days (default: 7)
+  - Deletes trigger errors (RetryCount=99) older than @DaysToKeep days
+  - Deletes failed records (RetryCount>=5) older than @DaysToKeep days
 
 #### Database Triggers (SQL Server 2014 Compatible)
 
@@ -602,7 +595,7 @@ The service integrates with existing POS tables through trigger-based change tra
 
 **Primary Keys:** All 366 tables have defined primary keys for data integrity **Performance Indexes:**
 
-- `IX_AvoqadoEntityTracking_Modified` - On LastModifiedAt + EntityType
+- `IX_Pending` - On `AvoqadoTracking(ProcessedAt, Timestamp)` for fast pending-change polling
 - `IX_cheques_workspaceid` - Multi-column index for workspace queries
 - `IX_cheques_fecha` - Date-based queries for reporting
 - `FYI_chequespagos_folio` - Foreign key index for payment lookups
@@ -741,7 +734,7 @@ documentation is organized into several interconnected files and directories tha
 **Table Schemas**:
 
 - `tempcheques_columns.txt` - Complete order table structure (194 columns)
-- `AvoqadoEntityTracking_*` - Change tracking table analysis
+- `AvoqadoTracking_*` - Change tracking table analysis
 - `AvoqadoPartialPayments_*` - Partial payment table analysis
 
 ### 📋 Quick Reference Commands
@@ -868,12 +861,14 @@ updated to the real shift ID during payment. This prevents duplicate orders in t
 ### Producer Architecture
 
 - **Version Detection**: Automatically detects SoftRestaurant version using `parametros2.versiondb` on startup (v2.4.0+)
-- **Polling**: Executes `sp_GetPendingChanges`/`sp_GetEntityChanges` every 2 seconds with batching (max 100 results),
+- **Polling**: Executes `sp_GetPendingChanges` every 2 seconds with batching (max 100 results),
   guarded against overlapping cycles (a slow batch never runs concurrently with the next tick)
-- **Durable sync cursor**: composite cursor `(LastModifiedAt, Id)` persisted to `sync-cursor.json`
-  (dev: project root; prod: `%ProgramData%\AvoqadoSync`) via `src/core/syncCursor.ts`. On restart the
-  Producer resumes exactly where it left off — long downtime no longer loses events (pre-v2.3 it only
-  looked back 5 minutes)
+- **Durable sync cursor (resilience layer)**: At-least-once delivery is guaranteed by the `ProcessedAt`
+  mechanism on `AvoqadoTracking` (`sp_GetPendingChanges` only returns rows where `ProcessedAt IS NULL`).
+  On top of that, `src/core/syncCursor.ts` persists a cursor `(Timestamp, Id)` over `AvoqadoTracking` to
+  `sync-cursor.json` (dev: project root; prod: `%ProgramData%\AvoqadoSync`). This disk cursor is an extra
+  resilience layer — NOT the primary delivery guarantee — that lets the Producer resume near where it left
+  off and avoid a blind re-scan window after a long restart
 - **SQL Server 2014 Compatibility**: Uses T-SQL syntax compatible with version 12.0.4100.1
 - **Debouncing**: Order updates batched for 2.5 seconds to reduce message volume
 - **Event Types**: `created`, `updated`, `deleted` for orders; `created`, `updated`, `deleted` for items
@@ -924,7 +919,7 @@ updated to the real shift ID during payment. This prevents duplicate orders in t
 
 ### Adding New Entity Types
 
-1. Add entity type to `AvoqadoEntityTracking` enum
+1. Add entity type to `AvoqadoTracking` enum
 2. Create corresponding database triggers
 3. Add processing logic in `producer.ts`
 4. Update message routing keys
@@ -1015,7 +1010,7 @@ SELECT
     ELSE 'Unknown'
   END as EntityIDFormat,
   COUNT(*) as Count
-FROM AvoqadoEntityTracking
+FROM AvoqadoTracking
 GROUP BY
   CASE
     WHEN EntityId LIKE '%:%:%' THEN 'v10 (InstanceId:IdTurno:Folio)'

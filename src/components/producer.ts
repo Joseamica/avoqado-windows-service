@@ -276,19 +276,20 @@ async function pollForChanges() {
 }
 
 /**
- * Purga diaria de AvoqadoEntityTracking: sin esto la tabla crece para siempre
- * y el poll de cada 2 segundos paga un scan cada vez más caro en el SQL
- * Express del venue. Borra entidades sin cambios en los últimos 30 días
- * (muy por detrás del cursor: ya fueron sincronizadas hace semanas).
+ * Purga diaria de AvoqadoTracking: sin esto la tabla crece para siempre y el
+ * poll de cada 2 segundos paga un scan cada vez más caro en el SQL Express del
+ * venue. Borra los registros ya procesados (ProcessedAt) y los errores de
+ * trigger más antiguos que PURGE_DAYS_TO_KEEP días, vía sp_CleanupOldTrackingRecords
+ * (Modelo A, instalado por 01-COMPLETE-INSTALL.sql).
  */
 async function maybePurgeTracking(pool: sql.ConnectionPool): Promise<void> {
   if (Date.now() - lastPurgeAt < PURGE_INTERVAL_MS) return
   lastPurgeAt = Date.now()
   try {
-    await pool.request().input('daysToKeep', sql.Int, PURGE_DAYS_TO_KEEP).execute('sp_PurgeAvoqadoTracking')
-    log.info(`[Producer] 🧹 Purga de tracking ejecutada (entidades sin cambios en ${PURGE_DAYS_TO_KEEP} días).`)
+    await pool.request().input('DaysToKeep', sql.Int, PURGE_DAYS_TO_KEEP).execute('sp_CleanupOldTrackingRecords')
+    log.info(`[Producer] 🧹 Limpieza de tracking ejecutada (registros procesados/errores con más de ${PURGE_DAYS_TO_KEEP} días).`)
   } catch (error) {
-    log.warn('[Producer] No se pudo ejecutar sp_PurgeAvoqadoTracking (¿falta el script 05?).', error)
+    log.warn('[Producer] No se pudo ejecutar sp_CleanupOldTrackingRecords (¿falta 01-COMPLETE-INSTALL.sql?).', error)
   }
 }
 

@@ -3,12 +3,13 @@ import path from 'path'
 import { log } from './logger'
 
 /**
- * Cursor de sincronización durable.
+ * Cursor de sincronización durable (capa de resiliencia).
  *
- * El Producer avanza sobre AvoqadoEntityTracking usando un cursor compuesto
- * (LastModifiedAt, Id). Antes vivía solo en memoria: un reinicio del servicio
- * con más de 5 minutos caído perdía todos los eventos pendientes de ese lapso.
- * Persistirlo en disco elimina esa pérdida.
+ * El Producer lee de AvoqadoTracking vía sp_GetPendingChanges (Modelo A:
+ * mark-processed con ProcessedAt). La entrega "at-least-once" la garantiza
+ * ProcessedAt; este cursor compuesto (Timestamp, Id) se persiste en disco como
+ * red de seguridad adicional: tras un reinicio largo el servicio retoma desde
+ * el último punto conocido en vez de re-escanear una ventana ciega.
  */
 export interface SyncCursor {
   lastModifiedAt: Date
