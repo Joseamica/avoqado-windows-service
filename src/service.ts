@@ -34,25 +34,25 @@ async function startApp() {
     log.info('✅ Comandante iniciado')
 
     // Iniciar producer (con heartbeats y polling)
-    startProducer()
+    await startProducer()
     log.info('✅ Producer iniciado')
 
     // Iniciar consola de administración en modo interactivo
-    if (process.env.NODE_ENV !== 'production') {
-      setTimeout(() => {
-        managementConsole.start()
-      }, 2000) // Dar tiempo para que se inicialicen todos los componentes
-    }
+    // DISABLED: Console causes crashes in background mode
+    // if (process.env.NODE_ENV !== 'production') {
+    //   setTimeout(() => {
+    //     managementConsole.start()
+    //   }, 2000) // Dar tiempo para que se inicialicen todos los componentes
+    // }
 
     log.info('🎉 Servicio de Sincronización Avoqado corriendo exitosamente.')
     log.info('📊 Estado inicial:', serviceStateManager.getCurrentState())
-    
+
     // Mensaje informativo sobre la consola
     if (process.env.NODE_ENV !== 'production') {
       console.log('\n💡 La consola de administración estará disponible en unos momentos.')
       console.log('   Escriba "help" para ver comandos disponibles.\n')
     }
-
   } catch (error) {
     log.error('🚨 Falla crítica durante el arranque del servicio:', error)
     serviceStateManager.stop('Error crítico en arranque')
@@ -62,7 +62,7 @@ async function startApp() {
 
 async function shutdown(signal: string) {
   log.warn(`🚨 Recibido ${signal}. Iniciando apagado limpio...`)
-  
+
   try {
     // Detener consola de administración
     managementConsole.stop()
@@ -82,7 +82,7 @@ async function shutdown(signal: string) {
     // Cerrar conexiones
     await closeRabbitMQConnection()
     log.info('✅ Conexión RabbitMQ cerrada')
-    
+
     await closeDbPool()
     log.info('✅ Pool de base de datos cerrado')
 
@@ -90,7 +90,7 @@ async function shutdown(signal: string) {
   } catch (error) {
     log.error('❌ Error durante apagado limpio:', error)
   }
-  
+
   process.exit(0)
 }
 

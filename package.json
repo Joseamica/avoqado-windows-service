@@ -11,14 +11,18 @@
     "svc:uninstall": "node dist/main.js uninstall",
     "format": "prettier --write \"src/**/*.ts\"",
     "check-format": "prettier --check \"src/**/*.ts\"",
-    "test": "vitest run"
+    "test": "vitest run",
+    "monitor": "node monitor-sql.js",
+    "monitor:build": "tsc src/tools/sqlMonitor.ts --outDir dist/tools && node dist/tools/sqlMonitor.js"
   },
   "dependencies": {
     "amqplib": "^0.10.3",
+    "cli-table3": "^0.6.5",
     "dotenv": "^16.3.1",
     "mssql": "^10.0.1",
     "node-windows": "^1.0.0-beta.8",
     "nodemon": "^3.1.10",
+    "sql-formatter": "^15.6.9",
     "uuid": "^11.1.0",
     "winston": "^3.11.0",
     "winston-daily-rotate-file": "^4.7.1",

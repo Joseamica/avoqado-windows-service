@@ -12,10 +12,30 @@ interface ConfigurationErrorMessage {
   payload: ConfigurationError
 }
 
+// Track configuration error patterns to avoid false positives
+interface ErrorTracker {
+  consecutiveErrors: number
+  lastErrorTime: Date
+  errorHistory: Array<{
+    timestamp: Date
+    errorType: string
+    details: string
+  }>
+}
+
+const MAX_CONSECUTIVE_ERRORS = 3
+const ERROR_COOLDOWN_MS = 2 * 60 * 1000 // 2 minutes cooldown
+const MAX_ERROR_HISTORY = 10
+
 let isConsumerRunning = false
 let configErrorQueue: string | null = null
 let consumerTag: string | null = null
 let reconnectHandlerRegistered = false
+let errorTracker: ErrorTracker = {
+  consecutiveErrors: 0,
+  lastErrorTime: new Date(0),
+  errorHistory: []
+}
 
 const handleConfigurationError = async (msg: ConsumeMessage | null) => {
   if (!msg) return
@@ -71,22 +91,63 @@ const handleConfigurationError = async (msg: ConsumeMessage | null) => {
 
 const handleInvalidVenueIdError = async (errorPayload: ConfigurationError) => {
   try {
-    log.error(`[Config Error Consumer] 🚨 VENUE ID INVÁLIDO: ${errorPayload.invalidVenueId}`)
+    const now = new Date()
+    const timeSinceLastError = now.getTime() - errorTracker.lastErrorTime.getTime()
 
-    // 1. Detener heartbeats para evitar más errores
-    log.info('[Config Error Consumer] Deteniendo heartbeats...')
-    stopHeartbeat()
+    // Add to error history
+    errorTracker.errorHistory.push({
+      timestamp: now,
+      errorType: errorPayload.errorType,
+      details: errorPayload.message
+    })
 
-    // 2. Actualizar estado del servicio
-    serviceStateManager.setConfigurationError(errorPayload)
+    // Keep only recent errors
+    if (errorTracker.errorHistory.length > MAX_ERROR_HISTORY) {
+      errorTracker.errorHistory.shift()
+    }
 
-    // 3. Registrar en Event Log de Windows
-    await logToWindowsEventLog(errorPayload)
+    // Check if this might be a database connectivity issue
+    const isDatabaseIssue = errorPayload.message?.includes('conectividad') ||
+                           errorPayload.message?.includes('Database unhealthy') ||
+                           (errorPayload as any).additionalInfo?.databaseHealthy === false
 
-    // 4. Mostrar notificación al administrador
-    await notifyConfigurationError(errorPayload)
+    // Reset counter if enough time has passed or if this is a database issue
+    if (timeSinceLastError > ERROR_COOLDOWN_MS || isDatabaseIssue) {
+      errorTracker.consecutiveErrors = 0
+      log.info(`[Config Error Consumer] Reset error counter due to ${isDatabaseIssue ? 'database issue' : 'cooldown period'}`)
+    }
 
-    log.warn('[Config Error Consumer] ⚠️ Servicio en modo de error de configuración. Se requiere reconfiguración manual.')
+    errorTracker.consecutiveErrors++
+    errorTracker.lastErrorTime = now
+
+    log.error(`[Config Error Consumer] 🚨 VENUE ID ERROR (${errorTracker.consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}): ${errorPayload.invalidVenueId}`)
+    log.error(`[Config Error Consumer] Error details: ${errorPayload.message}`)
+
+    // Only take drastic action after multiple consecutive errors
+    if (errorTracker.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+      log.error(`[Config Error Consumer] 🚨 ${MAX_CONSECUTIVE_ERRORS} errores consecutivos detectados. Deteniendo heartbeats...`)
+
+      // 1. Stop heartbeats to prevent more errors
+      stopHeartbeat()
+
+      // 2. Update service state
+      serviceStateManager.setConfigurationError(errorPayload)
+
+      // 3. Log to Windows Event Log
+      await logToWindowsEventLog(errorPayload)
+
+      // 4. Show notification to administrator
+      await notifyConfigurationError(errorPayload)
+
+      log.warn('[Config Error Consumer] ⚠️ Servicio en modo de error de configuración. Se requiere reconfiguración manual.')
+    } else {
+      // Just log the error but keep running
+      log.warn(`[Config Error Consumer] ⚠️ Error de configuración temporal (${errorTracker.consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}). ${isDatabaseIssue ? 'Problema de conectividad detectado.' : 'Esperando antes de tomar acción...'}`)
+
+      if (isDatabaseIssue) {
+        log.info('[Config Error Consumer] 💡 Esto parece ser un problema de conectividad a la base de datos. No se detendrán los heartbeats.')
+      }
+    }
   } catch (error) {
     log.error('[Config Error Consumer] Error manejando INVALID_VENUE_ID:', error)
   }
@@ -189,4 +250,37 @@ export const stopConfigurationErrorConsumer = async (): Promise<void> => {
 
 export const isConfigurationErrorConsumerRunning = (): boolean => {
   return isConsumerRunning
+}
+
+/**
+ * Get current error tracking status for monitoring
+ */
+export const getErrorTrackingStatus = () => {
+  return {
+    consecutiveErrors: errorTracker.consecutiveErrors,
+    lastErrorTime: errorTracker.lastErrorTime,
+    errorHistory: errorTracker.errorHistory.slice(-5), // Last 5 errors
+    isInErrorState: errorTracker.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS,
+    timeUntilReset: Math.max(0, ERROR_COOLDOWN_MS - (Date.now() - errorTracker.lastErrorTime.getTime()))
+  }
+}
+
+/**
+ * Manually reset error tracking (for recovery purposes)
+ */
+export const resetErrorTracking = () => {
+  log.info('[Config Error Consumer] 🔄 Resetting error tracking manually')
+  errorTracker.consecutiveErrors = 0
+  errorTracker.lastErrorTime = new Date(0)
+  errorTracker.errorHistory = []
+}
+
+/**
+ * Add success tracking to reset consecutive errors on successful operations
+ */
+export const recordSuccessfulHeartbeat = () => {
+  if (errorTracker.consecutiveErrors > 0) {
+    log.info(`[Config Error Consumer] ✅ Successful heartbeat after ${errorTracker.consecutiveErrors} errors. Resetting error counter.`)
+    errorTracker.consecutiveErrors = 0
+  }
 }

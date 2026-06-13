@@ -9,7 +9,9 @@ syncState.json
 /logs
 *.log
 
+
 # Archivos de entorno
+
 .env
 
 # Archivos del sistema operativo
@@ -18,3 +20,9 @@ Thumbs.db
 
 # Archivo del empaquetador
 /AvoqadoSyncService.exe
+
+
+# Local Claude config
+.claude/settings.local.json
+
+.sqlcred

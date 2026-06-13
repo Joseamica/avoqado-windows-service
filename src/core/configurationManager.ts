@@ -90,7 +90,7 @@ class ConfigurationManager {
     };
 
     this.configBackups.unshift(backup);
-    
+
     // Mantener solo los últimos backups
     if (this.configBackups.length > this.maxBackups) {
       this.configBackups = this.configBackups.slice(0, this.maxBackups);
@@ -148,11 +148,11 @@ class ConfigurationManager {
     // - Verificar permisos
 
     log.info(`[Config Manager] Validación de venueId ${venueId}: ${result.isValid ? 'VÁLIDO' : 'INVÁLIDO'}`);
-    
+
     if (result.errors.length > 0) {
       log.warn('[Config Manager] Errores de validación:', result.errors);
     }
-    
+
     if (result.warnings.length > 0) {
       log.info('[Config Manager] Advertencias de validación:', result.warnings);
     }
@@ -186,7 +186,7 @@ class ConfigurationManager {
 
       // Obtener configuración actual
       const currentConfig = loadConfig();
-      
+
       // Crear backup
       this.createBackup(currentConfig.venueId, reason);
 
@@ -198,7 +198,7 @@ class ConfigurationManager {
 
       // Reiniciar el producer para aplicar la nueva configuración
       log.info('[Config Manager] Reiniciando producer con nueva configuración...');
-      
+
       // Dar tiempo para que se procese
       setTimeout(async () => {
         try {
