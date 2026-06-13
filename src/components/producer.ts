@@ -4,15 +4,23 @@ import { log } from '../core/logger'
 import { publishMessage, POS_EVENTS_EXCHANGE } from '../core/rabbitmq'
 import { loadConfig } from '../config'
 import { serviceStateManager } from '../core/serviceState'
+import { loadSyncCursor, saveSyncCursor } from '../core/syncCursor'
 
-const PRODUCER_VERSION = '2.2.0-debounced'
+const PRODUCER_VERSION = '2.3.0-durable-cursor'
 const POLLING_INTERVAL_MS = 2000
 const HEARTBEAT_INTERVAL_MS = 60000
 // ✅ NUEVA CONSTANTE: Tiempo de espera en milisegundos antes de enviar una actualización de orden.
 const ORDER_DEBOUNCE_MS = 2500 // 2.5 segundos
+const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000 // Purga de tracking: una vez al día
+const PURGE_DAYS_TO_KEEP = 30
 
+// Cursor compuesto (LastModifiedAt, Id): persistido en disco para no perder
+// eventos cuando el servicio se reinicia (antes solo miraba 5 min hacia atrás).
 let lastSyncTimestamp = new Date(Date.now() - 5 * 60 * 1000)
+let lastSyncId = 0
 let isProducerHealthy = true
+let isPollInProgress = false
+let lastPurgeAt = Date.now()
 let heartbeatInterval: NodeJS.Timeout | null = null
 let pollingInterval: NodeJS.Timeout | null = null
 
@@ -21,6 +29,7 @@ let pollingInterval: NodeJS.Timeout | null = null
 const debouncedOrders = new Map<string, NodeJS.Timeout>()
 
 interface ChangeNotification {
+  Id: number | string // BIGINT: el driver mssql lo entrega como string
   EntityType: string
   EntityId: string
   LastModifiedAt: Date
@@ -100,15 +109,24 @@ async function pollForChanges() {
     log.warn('[Producer] El polling está en pausa debido a un fallo en el heartbeat.')
     return
   }
+  // ✅ GUARD ANTI-SOLAPE: setInterval no espera al ciclo anterior. Sin esto,
+  // un lote lento (>2s) provocaba polls concurrentes leyendo la misma ventana
+  // del cursor → eventos duplicados y carreras sobre lastSyncTimestamp.
+  if (isPollInProgress) {
+    return
+  }
+  isPollInProgress = true
   try {
     const pool = getDbPool()
     const result = await pool
       .request()
       .input('lastSyncTimestamp', sql.DateTime2, lastSyncTimestamp)
       .input('maxResults', sql.Int, 100)
+      .input('lastSyncId', sql.BigInt, lastSyncId)
       .execute('sp_GetEntityChanges')
 
     const changes = result.recordset as ChangeNotification[]
+    await maybePurgeTracking(pool)
     if (changes.length === 0) return
 
     log.info(`[Producer] 🎯 ${changes.length} nuevos cambios detectados.`)
@@ -195,9 +213,41 @@ async function pollForChanges() {
       }
     }
 
-    lastSyncTimestamp = changes[changes.length - 1].LastModifiedAt
-  } catch (error) {
+    // Avanzar el cursor compuesto y persistirlo: si el servicio muere aquí
+    // en adelante, al reiniciar retoma EXACTAMENTE donde se quedó en lugar
+    // de mirar solo 5 minutos hacia atrás (que perdía eventos de caídas largas).
+    const lastChange = changes[changes.length - 1]
+    lastSyncTimestamp = lastChange.LastModifiedAt
+    // El driver mssql devuelve BIGINT como string: normalizar a número.
+    lastSyncId = Number(lastChange.Id ?? 0)
+    saveSyncCursor({ lastModifiedAt: lastSyncTimestamp, lastId: lastSyncId })
+  } catch (error: any) {
+    const message: string = error?.message || ''
+    if (message.includes('lastSyncId') || message.includes('too many arguments')) {
+      log.error(
+        '[Producer] ⚠️ sp_GetEntityChanges no acepta @lastSyncId. La base de datos del POS necesita el script scripts/sql/05-Optimizacion-Tracking.sql ANTES de correr esta versión del servicio.',
+      )
+    }
     log.error('[Producer] Error en el ciclo de polling principal.', error)
+  } finally {
+    isPollInProgress = false
+  }
+}
+
+/**
+ * Purga diaria de AvoqadoEntityTracking: sin esto la tabla crece para siempre
+ * y el poll de cada 2 segundos paga un scan cada vez más caro en el SQL
+ * Express del venue. Borra entidades sin cambios en los últimos 30 días
+ * (muy por detrás del cursor: ya fueron sincronizadas hace semanas).
+ */
+async function maybePurgeTracking(pool: sql.ConnectionPool): Promise<void> {
+  if (Date.now() - lastPurgeAt < PURGE_INTERVAL_MS) return
+  lastPurgeAt = Date.now()
+  try {
+    await pool.request().input('daysToKeep', sql.Int, PURGE_DAYS_TO_KEEP).execute('sp_PurgeAvoqadoTracking')
+    log.info(`[Producer] 🧹 Purga de tracking ejecutada (entidades sin cambios en ${PURGE_DAYS_TO_KEEP} días).`)
+  } catch (error) {
+    log.warn('[Producer] No se pudo ejecutar sp_PurgeAvoqadoTracking (¿falta el script 05?).', error)
   }
 }
 
@@ -529,10 +579,17 @@ export const restartProducer = (): void => {
  */
 export const startProducer = () => {
   log.info(`🛡️ Iniciando Producer Resiliente v${PRODUCER_VERSION} (con Debounce y Heartbeat)...`)
-  
+
+  // Recuperar el cursor durable ANTES de empezar a poll-ear: si el servicio
+  // estuvo caído horas, retoma desde el último lote confirmado y no pierde nada.
+  const cursor = loadSyncCursor()
+  lastSyncTimestamp = cursor.lastModifiedAt
+  lastSyncId = cursor.lastId
+  log.info(`[Producer] 📍 Cursor de sincronización: ${lastSyncTimestamp.toISOString()} (Id ${lastSyncId})`)
+
   // Establecer estado inicial
   serviceStateManager.start()
-  
+
   // Iniciar componentes
   startPolling()
   startHeartbeat()

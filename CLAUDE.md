@@ -170,8 +170,11 @@ The service integrates deeply with SoftRestaurant POS database through a sophist
 1. **`00-Verificacion.sql`** - Quick system status check (can run anytime)
 2. **`01-Diagnostico.sql`** - Comprehensive diagnostic before any changes
 3. **`02-Limpieza.sql`** - Complete cleanup of all Avoqado objects (if needed)
-4. **`03-Instalacion.sql`** - Main installation script (creates all required objects)
+4. **`03-Instalacion-v2-sin-syncstate.sql`** - Main installation script (creates all required objects)
 5. **`04-Pruebas.sql`** - Testing script to verify installation
+6. **`05-Optimizacion-Tracking.sql`** - Performance & concurrency upgrade (v2.3): polling index,
+   set-based triggers (no cursors), race-safe upserts, composite cursor (LastModifiedAt, Id),
+   `sp_PurgeAvoqadoTracking`. **Run BEFORE deploying service v2.3+** (the new Producer passes `@lastSyncId`).
 
 ### Database Architecture
 
@@ -219,10 +222,14 @@ The service adds `AvoqadoLastModifiedAt` timestamp columns to:
 - **`turnos`** - Shift information (open/close times, cashier, station)
 
 #### Stored Procedures
-- **`sp_TrackEntityChange`** - Records entity changes with timestamps and reasons
-- **`sp_GetEntityChanges`** - Retrieves pending changes since last sync (batched, max 100)
+- **`sp_TrackEntityChange`** - Records entity changes with timestamps and reasons (race-safe upsert since v2.3)
+- **`sp_GetEntityChanges`** - Retrieves pending changes since last sync (batched, max 100). Since v2.3 uses a
+  composite cursor `(@lastSyncTimestamp, @lastSyncId)` and returns `Id`; `@lastSyncId` defaults to BIGINT MAX
+  so pre-v2.3 services keep their exact old semantics
+- **`sp_PurgeAvoqadoTracking`** - Daily purge of tracking rows untouched for N days (default 30); invoked by
+  the Producer once a day because SQL Express has no SQL Agent (v2.3+)
 - **`sp_UpdateEntitySnapshot`** - Updates content hash snapshots (v1 only)
-- **`sp_CleanupStuckTracking`** - Maintenance procedure for stuck records
+- **`sp_CleanupStuckTracking`** - Maintenance procedure for stuck records (v1 only)
 
 #### Database Triggers (SQL Server 2014 Compatible)
 - **`Trg_Avoqado_Orders`** - Tracks order creation, updates, and deletions on `tempcheques`
@@ -306,7 +313,12 @@ The service includes intelligent handling for SoftRestaurant's unique order life
 ## Key Technical Details
 
 ### Producer Architecture
-- **Polling**: Executes `sp_GetEntityChanges` every 2 seconds with batching (max 100 results)
+- **Polling**: Executes `sp_GetEntityChanges` every 2 seconds with batching (max 100 results), guarded
+  against overlapping cycles (a slow batch never runs concurrently with the next tick)
+- **Durable sync cursor**: composite cursor `(LastModifiedAt, Id)` persisted to `sync-cursor.json`
+  (dev: project root; prod: `%ProgramData%\AvoqadoSync`) via `src/core/syncCursor.ts`. On restart the
+  Producer resumes exactly where it left off — long downtime no longer loses events (pre-v2.3 it only
+  looked back 5 minutes)
 - **SQL Server 2014 Compatibility**: Uses T-SQL syntax compatible with version 12.0.4100.1
 - **Debouncing**: Order updates batched for 2.5 seconds to reduce message volume
 - **Event Types**: `created`, `updated`, `deleted` for orders; `created`, `updated`, `deleted` for items
@@ -403,3 +415,8 @@ the SAME change — never "later":** the full deck (`avoqado-presentacion.html`)
 (`avoqado-one-pager.html`), then regenerate both PDFs following that folder's `README.md`.
 Updating only one of the two is an incomplete change. Internal refactors and bugfixes with no
 customer-visible impact are exempt.
+
+## Health Stack
+
+- typecheck: npx tsc --noEmit
+- lint: npx prettier --check "src/**/*.ts"

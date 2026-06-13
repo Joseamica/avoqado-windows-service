@@ -30,7 +30,7 @@ async function startApp() {
     log.info('✅ Consumer de errores de configuración iniciado')
 
     // Iniciar commander (para comandos regulares)
-    startCommander()
+    await startCommander()
     log.info('✅ Comandante iniciado')
 
     // Iniciar producer (con heartbeats y polling)

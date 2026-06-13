@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { log } from './logger';
-import { AppConfig, loadConfig } from '../config';
+import { AppConfig, loadConfig, invalidateConfigCache } from '../config';
 import { serviceStateManager, ServiceState } from './serviceState';
 import { restartProducer } from '../components/producer';
 import { notifyReconfigurationSuccess, notifyReconfigurationFailure } from './windowsNotification';
@@ -21,10 +21,43 @@ export interface ValidationResult {
 class ConfigurationManager {
   private configBackups: ConfigurationBackup[] = [];
   private maxBackups = 10;
-  private configFilePath = path.resolve(__dirname, '../../.env');
 
   constructor() {
     this.loadBackupHistory();
+  }
+
+  /**
+   * Archivo de configuración ACTIVO según el entorno. Debe coincidir con lo
+   * que lee loadConfig(): .env en desarrollo, config.json en producción.
+   * (Antes siempre se escribía .env, así que reconfigurar en producción
+   * modificaba un archivo que nadie leía.)
+   */
+  private getActiveConfigTarget(): { mode: 'env' | 'json'; filePath: string } {
+    if (process.env.NODE_ENV === 'development') {
+      return { mode: 'env', filePath: path.resolve(__dirname, '../../.env') };
+    }
+    return {
+      mode: 'json',
+      filePath: path.join(process.env.ProgramData || 'C:/ProgramData', 'AvoqadoSync', 'config.json'),
+    };
+  }
+
+  private writeVenueIdToConfigSource(newVenueId: string): void {
+    const { mode, filePath } = this.getActiveConfigTarget();
+
+    if (mode === 'env') {
+      const envContent = fs.readFileSync(filePath, 'utf8');
+      const updatedContent = envContent.replace(/^VENUE_ID=.*$/m, `VENUE_ID=${newVenueId}`);
+      fs.writeFileSync(filePath, updatedContent);
+    } else {
+      const fileConfig = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      fileConfig.venueId = newVenueId;
+      fs.writeFileSync(filePath, JSON.stringify(fileConfig, null, 2));
+    }
+
+    // Sin invalidar el caché, loadConfig() seguiría devolviendo el venueId
+    // viejo y el restart del producer no aplicaría nada.
+    invalidateConfigCache();
   }
 
   private loadBackupHistory(): void {
@@ -157,17 +190,9 @@ class ConfigurationManager {
       // Crear backup
       this.createBackup(currentConfig.venueId, reason);
 
-      // Leer archivo .env actual
-      const envContent = fs.readFileSync(this.configFilePath, 'utf8');
-      
-      // Reemplazar VENUE_ID
-      const updatedContent = envContent.replace(
-        /^VENUE_ID=.*$/m,
-        `VENUE_ID=${newVenueId}`
-      );
-
-      // Escribir archivo actualizado
-      fs.writeFileSync(this.configFilePath, updatedContent);
+      // Escribir al archivo de configuración ACTIVO (env o json según entorno)
+      // e invalidar el caché para que el restart lea el valor nuevo.
+      this.writeVenueIdToConfigSource(newVenueId);
 
       log.info(`[Config Manager] ✅ venueId actualizado de ${currentConfig.venueId} a ${newVenueId}`);
 

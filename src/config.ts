@@ -78,6 +78,16 @@ const loadConfigFromFile = (): AppConfig => {
 };
 
 
+/**
+ * Invalida el caché de configuración. La siguiente llamada a loadConfig()
+ * re-lee el archivo fuente (.env en desarrollo, config.json en producción).
+ * Sin esto, una reconfiguración (p. ej. cambio de venueId) nunca surtía
+ * efecto: loadConfig() devolvía el caché viejo hasta reiniciar el proceso.
+ */
+export const invalidateConfigCache = (): void => {
+  config = undefined as unknown as AppConfig;
+};
+
 export const loadConfig = (): AppConfig => {
   if (config) return config;
 

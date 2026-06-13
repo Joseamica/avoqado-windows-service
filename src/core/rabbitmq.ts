@@ -7,6 +7,21 @@ let channelModel: ChannelModel | null = null
 let connection: Connection | null = null
 let channel: ConfirmChannel | null = null
 let isConnecting = false // Una bandera para evitar múltiples intentos de reconexión simultáneos
+let hasConnectedOnce = false
+let isShuttingDown = false
+
+type ReconnectHandler = () => void | Promise<void>
+const reconnectHandlers: ReconnectHandler[] = []
+
+/**
+ * Registra un handler que se re-ejecuta después de cada reconexión exitosa.
+ * Un canal nuevo NO hereda los consume() del canal muerto: todo consumer
+ * (Comandante, errores de configuración) debe registrarse aquí o dejará de
+ * recibir mensajes silenciosamente tras un blip de red.
+ */
+export const onReconnect = (handler: ReconnectHandler): void => {
+  reconnectHandlers.push(handler)
+}
 
 export const POS_EVENTS_EXCHANGE = 'pos_events_exchange';
 export const POS_COMMANDS_EXCHANGE = 'pos_commands_exchange';
@@ -46,7 +61,7 @@ export const publishMessage = async (
   };
 
 const connectWithRetry = async (): Promise<void> => {
-  if (isConnecting) return;
+  if (isConnecting || isShuttingDown) return;
   isConnecting = true;
   
   try {
@@ -79,6 +94,10 @@ const connectWithRetry = async (): Promise<void> => {
 
     connection.on('error', (err) => log.error('❌ Error de conexión con RabbitMQ:', err.message));
     connection.on('close', () => {
+      if (isShuttingDown) {
+        log.info('🚪 Conexión RabbitMQ cerrada (apagado del servicio).');
+        return;
+      }
       log.warn('🚪 Conexión con RabbitMQ cerrada. Reintentando...');
       connection = null;
       channel = null;
@@ -86,16 +105,32 @@ const connectWithRetry = async (): Promise<void> => {
       setTimeout(connectWithRetry, 5000);
     });
 
+    const isReconnect = hasConnectedOnce;
+    hasConnectedOnce = true;
     isConnecting = false;
+
+    if (isReconnect && reconnectHandlers.length > 0) {
+      log.info(`🔁 Reconexión a RabbitMQ: restableciendo ${reconnectHandlers.length} consumer(s)...`);
+      for (const handler of reconnectHandlers) {
+        try {
+          await handler();
+        } catch (err) {
+          log.error('❌ Error restableciendo un consumer tras la reconexión:', err);
+        }
+      }
+    }
 
   } catch (error) {
     log.error('🔥 Falla al conectar con RabbitMQ, reintentando...', error);
     isConnecting = false;
-    setTimeout(connectWithRetry, 5000);
+    if (!isShuttingDown) {
+      setTimeout(connectWithRetry, 5000);
+    }
   }
 };
 
 export const connectToRabbitMQ = async () => {
+  isShuttingDown = false;
   if (!channel) {
     await connectWithRetry();
   }
@@ -109,5 +144,19 @@ export const getRabbitMQChannel = (): amqp.ConfirmChannel => {
 };
 
 export const closeRabbitMQConnection = async (): Promise<void> => {
-    // Implementación de cierre limpio
+  isShuttingDown = true;
+  try {
+    if (channel) await channel.close();
+  } catch (error) {
+    log.warn('Error cerrando el canal de RabbitMQ:', error);
+  }
+  try {
+    if (channelModel) await channelModel.close();
+  } catch (error) {
+    log.warn('Error cerrando la conexión de RabbitMQ:', error);
+  }
+  channel = null;
+  connection = null;
+  channelModel = null;
+  log.info('🚪 Conexión RabbitMQ cerrada.');
 };

@@ -1,6 +1,6 @@
 import { ConsumeMessage } from 'amqplib'
 import { log } from '../core/logger'
-import { getRabbitMQChannel, POS_COMMANDS_EXCHANGE } from '../core/rabbitmq'
+import { getRabbitMQChannel, onReconnect, POS_COMMANDS_EXCHANGE } from '../core/rabbitmq'
 import { serviceStateManager, ConfigurationError } from '../core/serviceState'
 import { loadConfig } from '../config'
 import { stopHeartbeat, getInstanceId } from './producer'
@@ -14,6 +14,8 @@ interface ConfigurationErrorMessage {
 
 let isConsumerRunning = false
 let configErrorQueue: string | null = null
+let consumerTag: string | null = null
+let reconnectHandlerRegistered = false
 
 const handleConfigurationError = async (msg: ConsumeMessage | null) => {
   if (!msg) return
@@ -140,12 +142,26 @@ export const startConfigurationErrorConsumer = async (): Promise<void> => {
     await channel.bindQueue(configErrorQueue, POS_COMMANDS_EXCHANGE, routingKey)
 
     // Configurar consumer
-    await channel.consume(configErrorQueue, handleConfigurationError, {
+    const consumeResult = await channel.consume(configErrorQueue, handleConfigurationError, {
       noAck: false, // Requerimos acknowledgment manual
     })
+    consumerTag = consumeResult.consumerTag
 
     isConsumerRunning = true
     log.info(`[Config Error Consumer] ✅ Consumer iniciado para queue: ${configErrorQueue}, routing key: ${routingKey}`)
+
+    // Un canal nuevo (tras reconexión) no hereda los consume() del canal
+    // anterior: sin esto, el consumer de errores de configuración moría
+    // silenciosamente después de cualquier blip de red.
+    if (!reconnectHandlerRegistered) {
+      onReconnect(async () => {
+        log.info('[Config Error Consumer] Restableciendo consumer tras reconexión...')
+        isConsumerRunning = false
+        consumerTag = null
+        await startConfigurationErrorConsumer()
+      })
+      reconnectHandlerRegistered = true
+    }
   } catch (error) {
     log.error('[Config Error Consumer] 🔥 Error iniciando consumer:', error)
     throw error
@@ -153,15 +169,18 @@ export const startConfigurationErrorConsumer = async (): Promise<void> => {
 }
 
 export const stopConfigurationErrorConsumer = async (): Promise<void> => {
-  if (!isConsumerRunning || !configErrorQueue) {
+  if (!isConsumerRunning || !consumerTag) {
     return
   }
 
   try {
     const channel = getRabbitMQChannel()
-    await channel.cancel(configErrorQueue)
+    // channel.cancel espera el consumerTag devuelto por consume(), no el
+    // nombre de la cola (antes se pasaba la cola y la cancelación era un no-op).
+    await channel.cancel(consumerTag)
 
     isConsumerRunning = false
+    consumerTag = null
     log.info('[Config Error Consumer] Consumer detenido')
   } catch (error) {
     log.error('[Config Error Consumer] Error deteniendo consumer:', error)

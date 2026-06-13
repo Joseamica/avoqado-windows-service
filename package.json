@@ -10,7 +10,8 @@
     "svc:install": "npm run build && node dist/main.js install",
     "svc:uninstall": "node dist/main.js uninstall",
     "format": "prettier --write \"src/**/*.ts\"",
-    "check-format": "prettier --check \"src/**/*.ts\""
+    "check-format": "prettier --check \"src/**/*.ts\"",
+    "test": "vitest run"
   },
   "dependencies": {
     "amqplib": "^0.10.3",
@@ -36,7 +37,8 @@
     "pkg": "^5.8.1",
     "prettier": "^3.5.3",
     "ts-node": "^10.9.1",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "vitest": "^4.1.8"
   },
   "pkg": {
     "assets": [
