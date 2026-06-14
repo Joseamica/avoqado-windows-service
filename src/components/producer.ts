@@ -39,6 +39,11 @@ const debouncedOrders = new Map<string, DebounceEntry>()
 
 // ✅ VERSIÓN DETECTADA: Variable global para almacenar la versión detectada
 let detectedVersion: number | null = null
+// El formato de entity-id lo decide la PRESENCIA de WorkspaceId (igual que el SQL
+// de instalación), NO el número de versión: existen DBs con versiondb=10.x que SÍ
+// tienen WorkspaceId (los triggers generan GUIDs); el path v10 no podría parsearlos.
+// Ramificar por esto mantiene al producer alineado con los triggers/SQL.
+let usesWorkspaceId = false
 
 interface ChangeNotification {
   Id: number | string // BIGINT: el driver mssql lo entrega como string
@@ -229,7 +234,7 @@ async function pollForChanges() {
               }
               // ✅ LÓGICA DE DECISIÓN INTELIGENTE PARA EVITAR ELIMINACION DE ORDENES EN TURNOS CERRADOS
               if (eventType === 'deleted' && detectedVersion !== null) {
-                if (detectedVersion < 11.0) {
+                if (!usesWorkspaceId) {
                   // v10 format: INSTANCE:TURNO:FOLIO
                   const orderIdParts = change.EntityId.split(':')
                   if (orderIdParts.length === 3) {
@@ -423,7 +428,7 @@ async function processOrderChange(change: ChangeNotification, venueId: string): 
       return null
     }
 
-    if (detectedVersion >= 11.0) {
+    if (usesWorkspaceId) {
       // v11 format: WorkspaceId
       return await processOrderChangeV11(change, venueId, change.EntityId)
     } else {
@@ -681,7 +686,7 @@ async function processOrderItemChange(change: ChangeNotification, venueId: strin
       return null
     }
 
-    if (detectedVersion >= 11.0) {
+    if (usesWorkspaceId) {
       // 🔧 FIX: v11 format is JUST the WorkspaceId (no colon, no sequence)
       // Each order item has its own unique WorkspaceId
       const parts = change.EntityId.split(':')
@@ -827,7 +832,7 @@ async function processShiftChange(change: ChangeNotification, venueId: string): 
       return null
     }
 
-    if (detectedVersion >= 11.0) {
+    if (usesWorkspaceId) {
       // v11 format: Entity ID is WorkspaceId
       return await processShiftChangeV11(change, venueId, change.EntityId)
     } else {
@@ -950,6 +955,23 @@ const detectSoftRestaurantVersion = async (): Promise<number> => {
 }
 
 /**
+ * Detecta si la DB usa WorkspaceId (presencia de la columna en tempcheques).
+ * Es el MISMO criterio que usa el SQL de instalación para elegir el formato de
+ * entity-id, así producer y triggers nunca se contradicen (p. ej. una DB
+ * versiondb=10.x que sí tiene WorkspaceId genera GUIDs y debe ir por el path v11).
+ */
+const detectWorkspaceIdSupport = async (): Promise<boolean> => {
+  try {
+    const pool = getDbPool()
+    const result = await pool.request().query("SELECT COL_LENGTH('tempcheques','WorkspaceId') AS wid")
+    return result.recordset[0]?.wid != null
+  } catch (error) {
+    log.error('[Producer] Error detectando soporte de WorkspaceId, asumiendo que NO:', error)
+    return false
+  }
+}
+
+/**
  * Obtiene el instanceId de la base de datos
  */
 export const getInstanceId = async (): Promise<string> => {
@@ -1047,6 +1069,11 @@ export const startProducer = async () => {
 
     // ✅ NUEVO: Actualizar la configuración con la versión detectada
     updateDetectedVersion(detectedVersion)
+
+    // Decidir el formato de entity-id por presencia de WorkspaceId (alineado con el
+    // SQL/triggers), no por el número de versión: hay DBs versiondb=10.x CON WorkspaceId.
+    usesWorkspaceId = await detectWorkspaceIdSupport()
+    log.info(`[Producer] 🔑 Formato de entity-id: ${usesWorkspaceId ? 'WorkspaceId' : 'v10 (Instance:Turno:Folio)'}`)
 
     // Recuperar el cursor durable ANTES de empezar a poll-ear: si el servicio
     // estuvo caído horas, retoma desde el último lote confirmado y no pierde nada.
