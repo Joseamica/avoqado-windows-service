@@ -2,6 +2,7 @@
 /node_modules
 # Archivo de estado de sincronización
 syncState.json
+sync-cursor.json
 # Archivos de build
 /dist
 
