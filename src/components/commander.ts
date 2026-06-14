@@ -180,14 +180,14 @@ export const startCommander = async () => {
     return;
   }
 
-  await setupConsumer();
-
-  // Un canal nuevo (tras una reconexión) no hereda los consume() del canal
-  // anterior: sin este registro, después de un blip de red el servicio
-  // seguía publicando eventos pero dejaba de recibir comandos hasta reiniciar.
+  // El consumer de comandos se (re)vincula al canal en CADA conexión exitosa
+  // (incluida la primera). No vinculamos directo aquí: si RabbitMQ aún no
+  // conectó, el canal no existe y antes eso crasheaba el arranque. Un canal
+  // nuevo tampoco hereda los consume() del anterior, así que esto también cubre
+  // la reconexión tras un blip de red.
   if (!reconnectHandlerRegistered) {
     onReconnect(async () => {
-      log.info('[Comandante] Restableciendo consumer tras reconexión...');
+      log.info('[Comandante] Vinculando consumer de comandos al canal...');
       await setupConsumer();
     });
     reconnectHandlerRegistered = true;

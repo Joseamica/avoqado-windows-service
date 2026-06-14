@@ -21,13 +21,13 @@ async function startApp() {
     await connectToSql()
     log.info('✅ Conexión a base de datos establecida')
 
-    // Conectar a RabbitMQ
+    // Conectar a RabbitMQ (no bloquea: reintenta en background hasta conectar)
     await connectToRabbitMQ()
-    log.info('✅ Conexión a RabbitMQ establecida')
+    log.info('🔌 Conexión a RabbitMQ iniciada (en background)')
 
-    // Iniciar consumer de errores de configuración
+    // Registrar consumer de errores de configuración (se vincula al conectar)
     await startConfigurationErrorConsumer()
-    log.info('✅ Consumer de errores de configuración iniciado')
+    log.info('✅ Consumer de errores de configuración registrado')
 
     // Iniciar commander (para comandos regulares)
     await startCommander()

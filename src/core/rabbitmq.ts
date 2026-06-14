@@ -14,13 +14,22 @@ type ReconnectHandler = () => void | Promise<void>
 const reconnectHandlers: ReconnectHandler[] = []
 
 /**
- * Registra un handler que se re-ejecuta después de cada reconexión exitosa.
+ * Registra un handler que corre tras CADA conexión exitosa, incluida la primera.
  * Un canal nuevo NO hereda los consume() del canal muerto: todo consumer
  * (Comandante, errores de configuración) debe registrarse aquí o dejará de
  * recibir mensajes silenciosamente tras un blip de red.
+ *
+ * Cada handler corre exactamente una vez por conexión: si ya estamos conectados
+ * al registrarlo (consumer que arranca tarde), se ejecuta de inmediato; si no,
+ * lo ejecutará attemptConnect cuando la conexión se establezca.
  */
 export const onReconnect = (handler: ReconnectHandler): void => {
   reconnectHandlers.push(handler)
+  if (channel) {
+    Promise.resolve()
+      .then(handler)
+      .catch(err => log.error('❌ Error ejecutando handler de conexión de RabbitMQ:', err))
+  }
 }
 
 export const POS_EVENTS_EXCHANGE = 'pos_events_exchange'
@@ -50,80 +59,110 @@ export const publishMessage = async (exchange: string, routingKey: string, paylo
   }
 }
 
-const connectWithRetry = async (): Promise<void> => {
-  if (isConnecting || isShuttingDown) return
-  isConnecting = true
+const assertTopology = async (ch: ConfirmChannel): Promise<void> => {
+  await ch.assertExchange(DEAD_LETTER_EXCHANGE, 'direct', { durable: true })
+  await ch.assertQueue(AVOQADO_EVENTS_DLQ, { durable: true })
+  await ch.bindQueue(AVOQADO_EVENTS_DLQ, DEAD_LETTER_EXCHANGE, 'dead-letter')
+  await ch.assertExchange(POS_EVENTS_EXCHANGE, 'topic', { durable: true })
+  await ch.assertExchange(POS_COMMANDS_EXCHANGE, 'topic', { durable: true })
+  await ch.assertQueue(AVOQADO_EVENTS_QUEUE, {
+    durable: true,
+    arguments: {
+      'x-dead-letter-exchange': DEAD_LETTER_EXCHANGE,
+      'x-dead-letter-routing-key': 'dead-letter',
+    },
+  })
+}
 
-  try {
-    const { rabbitMqUrl } = loadConfig()
-    channelModel = await connect(rabbitMqUrl)
+/**
+ * Un intento de conexión: abre el canal, asegura la topología, cablea el evento
+ * de cierre (para reconectar en background) y ejecuta los handlers de consumers
+ * para que se (re)vinculen al canal nuevo. Lanza si algo falla.
+ */
+const attemptConnect = async (): Promise<void> => {
+  const { rabbitMqUrl } = loadConfig()
+  channelModel = await connect(rabbitMqUrl)
+  connection = channelModel.connection
+  channel = await channelModel.createConfirmChannel()
+  if (!channel || !connection) {
+    throw new Error('No se pudo crear el canal o la conexión de RabbitMQ.')
+  }
 
-    // Get the actual connection from the channel model
-    connection = channelModel.connection
+  log.info('✅ Conexión con RabbitMQ establecida.')
 
-    channel = await channelModel.createConfirmChannel()
-    if (!channel || !connection) {
-      throw new Error('No se pudo crear el canal o la conexión de RabbitMQ.')
+  await assertTopology(channel)
+  log.info('✅ Topología de RabbitMQ asegurada.')
+
+  connection.on('error', err => log.error('❌ Error de conexión con RabbitMQ:', err.message))
+  connection.on('close', () => {
+    if (isShuttingDown) {
+      log.info('🚪 Conexión RabbitMQ cerrada (apagado del servicio).')
+      return
     }
+    log.warn('🚪 Conexión con RabbitMQ cerrada. Reintentando en background...')
+    connection = null
+    channel = null
+    scheduleReconnect()
+  })
 
-    log.info('✅ Conexión con RabbitMQ establecida.')
+  hasConnectedOnce = true
 
-    await channel.assertExchange(DEAD_LETTER_EXCHANGE, 'direct', { durable: true })
-    await channel.assertQueue(AVOQADO_EVENTS_DLQ, { durable: true })
-    await channel.bindQueue(AVOQADO_EVENTS_DLQ, DEAD_LETTER_EXCHANGE, 'dead-letter')
-    await channel.assertExchange(POS_EVENTS_EXCHANGE, 'topic', { durable: true })
-    await channel.assertExchange(POS_COMMANDS_EXCHANGE, 'topic', { durable: true })
-    await channel.assertQueue(AVOQADO_EVENTS_QUEUE, {
-      durable: true,
-      arguments: {
-        'x-dead-letter-exchange': DEAD_LETTER_EXCHANGE,
-        'x-dead-letter-routing-key': 'dead-letter',
-      },
-    })
-    log.info('✅ Topología de RabbitMQ asegurada.')
-
-    connection.on('error', err => log.error('❌ Error de conexión con RabbitMQ:', err.message))
-    connection.on('close', () => {
-      if (isShuttingDown) {
-        log.info('🚪 Conexión RabbitMQ cerrada (apagado del servicio).')
-        return
+  // (Re)vincular todos los consumers al canal nuevo. El canal anterior murió con
+  // sus consume(), así que esto nunca duplica consumers dentro de una conexión.
+  if (reconnectHandlers.length > 0) {
+    log.info(`🔁 Vinculando ${reconnectHandlers.length} consumer(s) al canal de RabbitMQ...`)
+    for (const handler of reconnectHandlers) {
+      try {
+        await handler()
+      } catch (err) {
+        log.error('❌ Error vinculando un consumer:', err)
       }
-      log.warn('🚪 Conexión con RabbitMQ cerrada. Reintentando...')
+    }
+  }
+}
+
+/**
+ * Loop de conexión/reconexión en background: reintenta cada 5s hasta lograrlo
+ * (o hasta apagar). No bloquea a quien lo dispara — el arranque del servicio
+ * continúa y los consumers se vinculan vía onReconnect cuando la conexión queda.
+ */
+const scheduleReconnect = (): void => {
+  if (isShuttingDown || isConnecting) return
+  isConnecting = true
+  const tryOnce = async (): Promise<void> => {
+    if (isShuttingDown) {
+      isConnecting = false
+      return
+    }
+    try {
+      await attemptConnect()
+      isConnecting = false
+    } catch (error) {
+      log.error('🔥 Falla al conectar con RabbitMQ, reintentando en 5s...', error)
+      channelModel = null
       connection = null
       channel = null
-      isConnecting = false
-      setTimeout(connectWithRetry, 5000)
-    })
-
-    const isReconnect = hasConnectedOnce
-    hasConnectedOnce = true
-    isConnecting = false
-
-    if (isReconnect && reconnectHandlers.length > 0) {
-      log.info(`🔁 Reconexión a RabbitMQ: restableciendo ${reconnectHandlers.length} consumer(s)...`)
-      for (const handler of reconnectHandlers) {
-        try {
-          await handler()
-        } catch (err) {
-          log.error('❌ Error restableciendo un consumer tras la reconexión:', err)
-        }
-      }
-    }
-  } catch (error) {
-    log.error('🔥 Falla al conectar con RabbitMQ, reintentando...', error)
-    isConnecting = false
-    if (!isShuttingDown) {
-      setTimeout(connectWithRetry, 5000)
+      setTimeout(tryOnce, 5000)
     }
   }
+  void tryOnce()
 }
 
-export const connectToRabbitMQ = async () => {
+/**
+ * Arranca la conexión a RabbitMQ SIN bloquear ni crashear. Antes, si el primer
+ * intento fallaba, el código tragaba el error y devolvía OK aunque no hubiera
+ * canal: el arranque logueaba un "✅ establecida" falso y luego se caía al usar
+ * el canal nulo. Ahora la conexión vive en un loop de reintento en background y
+ * los consumers se vinculan cuando conecta.
+ */
+export const connectToRabbitMQ = async (): Promise<void> => {
   isShuttingDown = false
-  if (!channel) {
-    await connectWithRetry()
-  }
+  if (channel) return
+  scheduleReconnect()
 }
+
+/** True si hay un canal de RabbitMQ activo (para diferir publish si está caído). */
+export const isRabbitConnected = (): boolean => channel !== null
 
 export const getRabbitMQChannel = (): amqp.ConfirmChannel => {
   if (!channel) {

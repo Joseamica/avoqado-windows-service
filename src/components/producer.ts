@@ -1,7 +1,7 @@
 import sql from 'mssql'
 import { getDbPool } from '../core/db'
 import { log } from '../core/logger'
-import { publishMessage, POS_EVENTS_EXCHANGE } from '../core/rabbitmq'
+import { publishMessage, POS_EVENTS_EXCHANGE, isRabbitConnected } from '../core/rabbitmq'
 import { loadConfig, updateDetectedVersion } from '../config'
 import { serviceStateManager } from '../core/serviceState'
 import { loadSyncCursor, saveSyncCursor } from '../core/syncCursor'
@@ -121,6 +121,12 @@ async function pollForChanges() {
   // un lote lento (>2s) provocaba polls concurrentes leyendo la misma ventana
   // del cursor → eventos duplicados y carreras sobre lastSyncTimestamp.
   if (isPollInProgress) {
+    return
+  }
+  // Sin RabbitMQ no podemos publicar: diferimos el polling para NO marcar
+  // cambios como procesados sin haberlos enviado (se perderían). Quedan en
+  // AvoqadoTracking (ProcessedAt NULL) y se envían cuando la conexión vuelve.
+  if (!isRabbitConnected()) {
     return
   }
   isPollInProgress = true

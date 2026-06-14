@@ -178,54 +178,50 @@ ACTION REQUIRED: Please reconfigure the service with a valid venue ID.`
   }
 }
 
+const bindConfigErrorConsumer = async (): Promise<void> => {
+  const channel = getRabbitMQChannel()
+  const { posType } = loadConfig()
+  const instanceId = await getInstanceId()
+
+  // Crear cola específica para esta instancia
+  configErrorQueue = `config_errors_${posType}_${instanceId}`
+
+  await channel.assertQueue(configErrorQueue, {
+    durable: true,
+    autoDelete: false,
+    exclusive: false,
+  })
+
+  // Bind queue to exchange con routing key para errores de configuración
+  const routingKey = `command.${posType}.configuration.error`
+  await channel.bindQueue(configErrorQueue, POS_COMMANDS_EXCHANGE, routingKey)
+
+  // Configurar consumer
+  const consumeResult = await channel.consume(configErrorQueue, handleConfigurationError, {
+    noAck: false, // Requerimos acknowledgment manual
+  })
+  consumerTag = consumeResult.consumerTag
+
+  isConsumerRunning = true
+  log.info(`[Config Error Consumer] ✅ Consumer iniciado para queue: ${configErrorQueue}, routing key: ${routingKey}`)
+}
+
 export const startConfigurationErrorConsumer = async (): Promise<void> => {
-  if (isConsumerRunning) {
-    log.warn('[Config Error Consumer] Consumer ya está corriendo')
-    return
-  }
-
-  try {
-    const channel = getRabbitMQChannel()
-    const { posType } = loadConfig()
-    const instanceId = await getInstanceId()
-
-    // Crear cola específica para esta instancia
-    configErrorQueue = `config_errors_${posType}_${instanceId}`
-
-    await channel.assertQueue(configErrorQueue, {
-      durable: true,
-      autoDelete: false,
-      exclusive: false,
-    })
-
-    // Bind queue to exchange with routing key para errores de configuración
-    const routingKey = `command.${posType}.configuration.error`
-    await channel.bindQueue(configErrorQueue, POS_COMMANDS_EXCHANGE, routingKey)
-
-    // Configurar consumer
-    const consumeResult = await channel.consume(configErrorQueue, handleConfigurationError, {
-      noAck: false, // Requerimos acknowledgment manual
-    })
-    consumerTag = consumeResult.consumerTag
-
-    isConsumerRunning = true
-    log.info(`[Config Error Consumer] ✅ Consumer iniciado para queue: ${configErrorQueue}, routing key: ${routingKey}`)
-
-    // Un canal nuevo (tras reconexión) no hereda los consume() del canal
-    // anterior: sin esto, el consumer de errores de configuración moría
-    // silenciosamente después de cualquier blip de red.
-    if (!reconnectHandlerRegistered) {
-      onReconnect(async () => {
-        log.info('[Config Error Consumer] Restableciendo consumer tras reconexión...')
+  // El consumer se (re)vincula al canal en CADA conexión exitosa (incluida la
+  // primera). Antes vinculaba directo aquí y, si RabbitMQ no había conectado,
+  // getRabbitMQChannel lanzaba y crasheaba el arranque. Un canal nuevo tampoco
+  // hereda los consume() del anterior, así que esto cubre también el blip de red.
+  if (!reconnectHandlerRegistered) {
+    onReconnect(async () => {
+      try {
         isConsumerRunning = false
         consumerTag = null
-        await startConfigurationErrorConsumer()
-      })
-      reconnectHandlerRegistered = true
-    }
-  } catch (error) {
-    log.error('[Config Error Consumer] 🔥 Error iniciando consumer:', error)
-    throw error
+        await bindConfigErrorConsumer()
+      } catch (error) {
+        log.error('[Config Error Consumer] 🔥 Error vinculando consumer:', error)
+      }
+    })
+    reconnectHandlerRegistered = true
   }
 }
 
