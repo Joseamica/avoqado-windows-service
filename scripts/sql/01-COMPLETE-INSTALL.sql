@@ -1,4 +1,13 @@
 -- ====================================================================
+-- REQUERIDO: la tabla AvoqadoTracking tiene un índice filtrado (IX_Pending).
+-- Crear ese índice y hacer DML sobre la tabla (incl. dentro de triggers/SPs)
+-- exige QUOTED_IDENTIFIER ON. sqlcmd por defecto lo deja OFF → error 1934.
+-- Fijarlo aquí garantiza que TODO el script (y los objetos que crea, que
+-- capturan estas opciones al crearse) corra correctamente, con o sin -I.
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+-- ====================================================================
 -- COMPLETE AVOQADO INSTALLATION - ALL IN ONE
 -- Includes: Base + NULL Fix + SQL 2014 Fix + Payment Methods
 -- SQL Server 2014 Compatible

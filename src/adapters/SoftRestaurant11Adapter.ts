@@ -67,8 +67,11 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('movimiento', sql.Int, nextMovement)
         .input('idproducto', sql.VarChar, actualPosProductId)
         .input('cantidad', sql.Int, item.quantity)
-        .input('precio', sql.Money, item.price * item.quantity)
-        .input('preciosinimpuestos', sql.Money, priceWithoutTax * item.quantity)
+        // tempcheqdet.precio es UNITARIO en SoftRestaurant (la línea = precio*cantidad,
+        // como lo lee el producer). item.price ya es el precio unitario, así que NO
+        // se multiplica por cantidad aquí (antes duplicaba totales con cantidad>1).
+        .input('precio', sql.Money, item.price)
+        .input('preciosinimpuestos', sql.Money, priceWithoutTax)
         .input('idmesero', sql.VarChar, item.waiterPosId)
         .input('comentario', sql.VarChar, item.notes || '')
         .query(insertQuery)

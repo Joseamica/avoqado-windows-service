@@ -1,4 +1,10 @@
 -- ====================================================================
+-- Requerido para DML sobre tablas con índice filtrado (AvoqadoTracking).
+-- sqlcmd deja QUOTED_IDENTIFIER OFF por defecto → error 1934 al limpiar.
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+-- ====================================================================
 -- COMPLETE CLEANUP - Remove ALL Avoqado objects
 -- Run this to start fresh
 -- ====================================================================
