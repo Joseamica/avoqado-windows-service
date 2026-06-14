@@ -27,7 +27,15 @@ let pollingInterval: NodeJS.Timeout | null = null
 
 // ✅ NUEVO MAPA: Almacena los temporizadores para cada orden que está en "debounce".
 // La clave es el EntityId de la orden, el valor es el temporizador de Node.js.
-const debouncedOrders = new Map<string, NodeJS.Timeout>()
+// EntityId → estado de debounce: el timer pendiente, los Id de AvoqadoTracking
+// acumulados (se marcan procesados SOLO cuando el publish confirma) y el último
+// cambio a publicar.
+interface DebounceEntry {
+  timer: NodeJS.Timeout
+  ids: Set<number | string>
+  change: ChangeNotification
+}
+const debouncedOrders = new Map<string, DebounceEntry>()
 
 // ✅ VERSIÓN DETECTADA: Variable global para almacenar la versión detectada
 let detectedVersion: number | null = null
@@ -74,39 +82,59 @@ async function sendHeartbeat() {
 }
 
 /**
- * Nueva función que maneja el debouncing para las actualizaciones de órdenes.
+ * Marca como procesados (ProcessedAt) SOLO los Id cuyo publish ya se confirmó.
+ * Los que fallaron quedan ProcessedAt NULL y el próximo poll los reintenta.
+ */
+async function markProcessed(ids: Array<number | string>): Promise<void> {
+  if (ids.length === 0) return
+  const pool = getDbPool()
+  await pool.request().input('Ids', sql.VarChar(sql.MAX), ids.join(',')).execute('sp_MarkChangesProcessed')
+}
+
+/**
+ * Debouncing de actualizaciones de orden. CLAVE de durabilidad: los Id de
+ * tracking NO se marcan procesados en el poll; este timer los marca SOLO tras
+ * un publish confirmado. Si el publish falla (o el proceso muere antes), las
+ * filas siguen ProcessedAt NULL y el próximo poll las reintenta → no se pierde
+ * el evento. Acumula los Id de cada re-lectura del mismo cambio y NO reinicia
+ * el timer en re-lecturas (el poll re-lee filas pendientes cada 2s; reiniciar
+ * el timer de 2.5s en cada una lo dejaría sin disparar nunca = inanición).
  */
 async function debounceAndSendOrderUpdate(change: ChangeNotification) {
-  // Si ya hay un temporizador para esta orden, lo cancelamos.
-  if (debouncedOrders.has(change.EntityId)) {
-    clearTimeout(debouncedOrders.get(change.EntityId)!)
+  const existing = debouncedOrders.get(change.EntityId)
+  if (existing && existing.ids.has(change.Id)) {
+    // Re-lectura de una fila ya en cola (aún sin marcar): no reiniciar el timer.
+    existing.change = change
+    return
   }
 
-  log.info(`[Debouncer] ⏳ Recibido cambio para la orden ${change.EntityId}. Iniciando temporizador de ${ORDER_DEBOUNCE_MS}ms...`)
+  const ids = existing ? existing.ids : new Set<number | string>()
+  ids.add(change.Id)
+  if (existing) clearTimeout(existing.timer)
 
-  // Creamos un nuevo temporizador.
+  log.info(`[Debouncer] ⏳ Cambio para la orden ${change.EntityId}. Temporizador de ${ORDER_DEBOUNCE_MS}ms...`)
+
   const timer = setTimeout(async () => {
+    const entry = debouncedOrders.get(change.EntityId)
+    debouncedOrders.delete(change.EntityId)
+    if (!entry) return
     try {
-      log.info(`[Debouncer] 🔥 ¡Temporizador para la orden ${change.EntityId} finalizado! Enviando actualización...`)
       const { venueId, posType } = loadConfig()
-
-      // Obtenemos el estado FINAL de la orden y lo enviamos.
-      const result = await processOrderChange(change, venueId)
+      const result = await processOrderChange(entry.change, venueId)
       if (result && result.payload) {
         const routingKey = `pos.${posType}.order.updated`
         await publishMessage(POS_EVENTS_EXCHANGE, routingKey, result.payload)
         log.info(`[Debouncer] ✅ Evento enviado: ${routingKey} para ${change.EntityId}`)
       }
+      // Publish confirmado (o sin payload que enviar): recién ahora marcamos.
+      await markProcessed([...entry.ids])
     } catch (error) {
-      log.error(`[Debouncer] Error al enviar la actualización debounced para la orden ${change.EntityId}`, error)
-    } finally {
-      // Limpiamos el mapa una vez que el trabajo está hecho.
-      debouncedOrders.delete(change.EntityId)
+      // No marcamos: el próximo poll re-lee (ProcessedAt NULL) y reintenta.
+      log.error(`[Debouncer] Error en publish debounced de ${change.EntityId}; se reintentará en el próximo poll.`, error)
     }
   }, ORDER_DEBOUNCE_MS)
 
-  // Guardamos el nuevo temporizador en el mapa.
-  debouncedOrders.set(change.EntityId, timer)
+  debouncedOrders.set(change.EntityId, { timer, ids, change })
 }
 
 /**
@@ -166,8 +194,12 @@ async function pollForChanges() {
       }
     }
     // ✅ PASO 2: Procesar cada cambio con el contexto que acabamos de obtener.
+    // Solo marcaremos procesados los Id cuyo publish se confirme (los debounced
+    // los marca su propio timer). Los fallidos quedan pendientes → se reintentan.
+    const succeededIds: Array<number | string> = []
 
     for (const change of changes) {
+      let deferredToDebounce = false
       try {
         let result: { payload: object } | null = null
         // Map CREATE -> created, UPDATE -> updated, DELETE -> deleted, CLOSED -> closed, OPENED -> created
@@ -186,11 +218,13 @@ async function pollForChanges() {
             // Esto se aplica si el cambio es 'updated' o el genérico 'item_change'.
             if (eventType === 'updated' || eventType === 'change') {
               await debounceAndSendOrderUpdate(change)
+              deferredToDebounce = true
             } else {
               // Para 'created' o 'deleted', enviamos inmediatamente.
-              if (debouncedOrders.has(change.EntityId)) {
+              const pendingDebounce = debouncedOrders.get(change.EntityId)
+              if (pendingDebounce) {
                 log.info(`[Producer] 🚫 Cancelando actualización debounced para ${change.EntityId} debido a un evento inmediato.`)
-                clearTimeout(debouncedOrders.get(change.EntityId)!)
+                clearTimeout(pendingDebounce.timer)
                 debouncedOrders.delete(change.EntityId)
               }
               // ✅ LÓGICA DE DECISIÓN INTELIGENTE PARA EVITAR ELIMINACION DE ORDENES EN TURNOS CERRADOS
@@ -204,7 +238,9 @@ async function pollForChanges() {
                       log.info(
                         `[Producer-Context] Ignorando eliminación de la orden ${change.EntityId} porque pertenece al turno cerrado ${shiftIdForOrder}.`,
                       )
-                      continue // Saltamos al siguiente cambio en el bucle.
+                      // Suprimido a propósito: marcar procesado para no reintentarlo.
+                      succeededIds.push(change.Id)
+                      continue
                     }
                   }
                 } else {
@@ -252,18 +288,18 @@ async function pollForChanges() {
             }
             break
         }
+        // Llegamos aquí sin excepción: el publish (o el skip intencional) tuvo
+        // éxito. Los debounced se marcan en su propio timer, no aquí.
+        if (!deferredToDebounce) succeededIds.push(change.Id)
       } catch (error) {
-        log.error(`[Producer] Error procesando la entidad ${change.EntityType}:${change.EntityId}`, error)
+        // El publish lanzó: NO marcamos esta fila → el próximo poll la reintenta.
+        log.error(`[Producer] Error procesando la entidad ${change.EntityType}:${change.EntityId}; se reintentará.`, error)
       }
     }
 
-    // Marcar los cambios como procesados (modelo mark-processed de AvoqadoTracking:
-    // sp_GetPendingChanges solo devuelve filas con ProcessedAt IS NULL).
-    const processedIds = changes.map(c => c.Id).join(',')
-    await pool
-      .request()
-      .input('Ids', sql.VarChar(sql.MAX), processedIds)
-      .execute('sp_MarkChangesProcessed')
+    // Marcar procesados SOLO los cambios cuyo publish se confirmó. Los fallidos
+    // y los diferidos al debounce NO se marcan aquí → no se pierden eventos.
+    await markProcessed(succeededIds)
 
     // Avanzar el cursor compuesto y persistirlo en disco: capa de resiliencia
     // adicional al ProcessedAt. Si el servicio muere aquí en adelante, al
