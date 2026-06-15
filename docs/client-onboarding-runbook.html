@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Avoqado Sync Service — Runbook de Onboarding</title>
+<style>
+  :root{
+    --bg:#0f1116; --card:#171a21; --ink:#e8eaed; --muted:#9aa0aa; --line:#262b35;
+    --brand:#7c5cff; --brand2:#28c2a0; --warn:#ffb020; --danger:#ff5c5c; --ok:#28c2a0;
+    --code:#0b0d12;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:880px;margin:0 auto;padding:40px 24px 80px;}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:28px;}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.3px}
+  h1 .dot{color:var(--brand)}
+  .sub{color:var(--muted);font-size:14px}
+  h2{font-size:18px;margin:34px 0 12px;padding-top:8px;border-top:1px solid var(--line)}
+  h2 .n{display:inline-block;width:26px;height:26px;line-height:26px;text-align:center;background:var(--brand);color:#fff;border-radius:7px;font-size:14px;margin-right:9px;font-weight:700}
+  h3{font-size:15px;margin:18px 0 6px;color:var(--brand2)}
+  p{margin:8px 0}
+  code{background:var(--code);color:#d7c9ff;padding:1px 6px;border-radius:5px;font:13px/1.5 ui-monospace,Consolas,monospace}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:9px;padding:14px 16px;overflow:auto;margin:10px 0}
+  pre code{background:none;color:#cdd3dc;padding:0}
+  .rule{background:linear-gradient(90deg,rgba(124,92,255,.16),rgba(124,92,255,.03));border-left:3px solid var(--brand);border-radius:8px;padding:12px 16px;margin:14px 0;font-size:14px}
+  .callout{border-radius:8px;padding:11px 15px;margin:12px 0;font-size:14px;border-left:3px solid}
+  .warn{background:rgba(255,176,32,.08);border-color:var(--warn)}
+  .ok{background:rgba(40,194,160,.08);border-color:var(--ok)}
+  ul.check{list-style:none;padding:0;margin:8px 0}
+  ul.check li{padding:4px 0 4px 28px;position:relative}
+  ul.check li:before{content:"☐";position:absolute;left:4px;color:var(--brand);font-size:15px}
+  .steps{counter-reset:s}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600}
+  .pill.v{background:rgba(40,194,160,.15);color:var(--brand2)}
+  .foot{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+  a{color:var(--brand2)}
+  @media print{body{background:#fff;color:#111}.wrap{max-width:100%}h2{border-color:#ddd}.rule,.callout{box-shadow:none}pre,code{background:#f4f4f7;color:#222}.card{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Avoqado Sync Service <span class="dot">·</span> Runbook de Onboarding</h1>
+    <div class="sub">Procedimiento canónico para conectar un cliente SoftRestaurant nuevo a la sincronización Avoqado en tiempo real.</div>
+  </header>
+
+  <div class="rule"><strong>Regla de oro del orden:</strong> el venue debe existir <strong>primero en el backend de Avoqado</strong>. Si el servicio empieza a publicar eventos de un venue que no existe en el backend, esos eventos se pierden (dead-letter) y los heartbeats disparan <code>configuration.error</code>. <strong>Backend → DB → servicio.</strong></div>
+
+  <h2><span class="n">0</span>Compatibilidad (v10 / v11 / v12 — mismo binario)</h2>
+  <p>Motor: <strong>SQL Server 2014 Express (32-bit)</strong> para todas las versiones (v12 es la versión del POS, no del motor). El formato de entity-id se decide por <strong>presencia de la columna <code>WorkspaceId</code></strong>, no por el número de versión:</p>
+  <ul>
+    <li><span class="pill v">v11 / v12</span> y cualquier v10 con <code>WorkspaceId</code> → path WorkspaceId. ✅ validado en vivo.</li>
+    <li><span class="pill v">v10 puro</span> (sin <code>WorkspaceId</code>) → <code>{Instance}:{IdTurno}:{Folio}</code>. <em>(Raro en la práctica — validar contra un v10 limpio real antes de go-live.)</em></li>
+  </ul>
+
+  <h2><span class="n">1</span>Prerrequisitos</h2>
+  <h3>En el backend de Avoqado (PRIMERO)</h3>
+  <ul class="check">
+    <li>Crear el <strong>Venue</strong> en la plataforma → anotar su <strong><code>venueId</code></strong>.</li>
+    <li>Poner <strong><code>posType = SOFTRESTAURANT</code></strong> al venue (requerido para recibir comandos).</li>
+    <li>Confirmar que el backend está conectado al <strong>broker RabbitMQ compartido</strong> (el mismo que usará el servicio).</li>
+  </ul>
+  <h3>En el servidor del POS del cliente</h3>
+  <ul class="check">
+    <li><strong>Node.js 18</strong> (o usar el <code>AvoqadoSyncService.exe</code> empaquetado, que incluye Node).</li>
+    <li>Permisos de <strong>Administrador</strong>.</li>
+    <li>Salida de red al broker (puerto <strong>5671</strong> TLS / 5672).</li>
+    <li>SQL local accesible: <code>localhost\NATIONALSOFT</code>.</li>
+  </ul>
+
+  <h2><span class="n">2</span>Paso a paso</h2>
+  <h3>1 · Backup de la base de datos</h3>
+  <pre><code>BACKUP DATABASE [DB_NAME] TO DISK = 'C:\Backups\DB_NAME_PRE_AVOQADO.bak' WITH FORMAT, INIT, COMPRESSION</code></pre>
+
+  <h3>2 · Detectar versión (sanity check)</h3>
+  <pre><code>SELECT versiondb FROM parametros2;                        -- 10.x / 11.x / 12.x
+SELECT COL_LENGTH('tempcheques','WorkspaceId') AS HasWID;  -- 16 = path WorkspaceId, NULL = v10 puro</code></pre>
+
+  <h3>3 · Instalar los objetos SQL de Avoqado</h3>
+  <p>Contra la base del venue. El script fija <code>QUOTED_IDENTIFIER ON</code>, así que <code>-I</code> es opcional:</p>
+  <pre><code>sqlcmd -S "localhost\NATIONALSOFT" -U sa -P &lt;PW&gt; -d &lt;DB_NAME&gt; -i "scripts\sql\01-COMPLETE-INSTALL.sql"</code></pre>
+  <p class="sub">Si hubo una instalación previa/parcial, correr antes <code>00-CLEANUP-ALL.sql</code>.</p>
+
+  <h3>4 · Verificar la instalación</h3>
+  <pre><code>sqlcmd -S "localhost\NATIONALSOFT" -U sa -P &lt;PW&gt; -d &lt;DB_NAME&gt; -i "scripts\sql\00-VERIFICATION.sql"</code></pre>
+  <p>Esperado: 7 tablas <code>Avoqado*</code>, los stored procedures, <strong>4 triggers HABILITADOS</strong>, métodos de pago <code>ACASH</code>/<code>ACARD</code>.</p>
+
+  <h3>5 · Configurar el servicio (producción)</h3>
+  <p>Producción lee <code>%ProgramData%\AvoqadoSync\config.json</code> (NO <code>.env</code>; <code>NODE_ENV</code> no debe ser <code>development</code>):</p>
+  <pre><code>{
+  "venueId": "&lt;VENUE_ID_DEL_BACKEND&gt;",
+  "posType": "softrestaurant",
+  "posVersion": "11",
+  "rabbitMqUrl": "amqps://user:pass@&lt;BROKER_COMPARTIDO&gt;/vhost",
+  "sqlConfig": {
+    "server": "localhost",
+    "instanceName": "NATIONALSOFT",
+    "database": "&lt;DB_NAME&gt;",
+    "user": "sa",
+    "password": "&lt;PW&gt;",
+    "options": { "instanceName": "NATIONALSOFT", "encrypt": false, "trustServerCertificate": true }
+  }
+}</code></pre>
+  <div class="callout warn"><strong>⚠️ El <code>rabbitMqUrl</code> debe ser el MISMO broker que consume el backend</strong> — si no, los eventos nunca llegan.</div>
+
+  <h3>6 · Instalar y arrancar el servicio (como Administrador)</h3>
+  <pre><code>npm run svc:install            # registra "Avoqado POS Sync Service" y lo arranca (auto-start al boot)
+Get-Service -Name "Avoqado POS Sync Service"</code></pre>
+
+  <h2><span class="n">3</span>Checklist de go-live</h2>
+  <ul class="check">
+    <li>Logs (<code>logs\info-YYYY-MM-DD.log</code>): <em>Versión detectada · SQL Server establecida · RabbitMQ establecida · Vinculando consumer(s)</em>.</li>
+    <li>Heartbeat cada 60s: <code>❤️ Latido enviado</code>.</li>
+    <li>Backend: el venue muestra <strong><code>PosConnectionStatus = ONLINE</code></strong> / <code>posStatus = CONNECTED</code>.</li>
+    <li>Crear una orden real en el POS → aparece en el backend (fila <code>Order</code> / dashboard).</li>
+    <li>Cerrar turno en el POS → sin eventos "deleted" espurios; se publica <code>shift.closed</code>.</li>
+  </ul>
+
+  <h2><span class="n">4</span>No interferencia con el POS</h2>
+  <div class="callout ok">Los triggers son <strong>set-based</strong> (multi-fila), con <code>SET NOCOUNT ON</code> y <strong>TRY/CATCH que registra pero NO hace ROLLBACK</strong> → un fallo de tracking <strong>nunca aborta</strong> una orden/pago del POS.</div>
+  <ul>
+    <li>El polling lee la tabla aparte <code>AvoqadoTracking</code> (indexada), cada 2s, con guarda anti-solape.</li>
+    <li><strong>Siempre correr <code>00-VERIFICATION.sql</code> tras instalar</strong> — el único riesgo residual es una tabla de tracking ausente/rota, que la verificación detecta.</li>
+    <li>El Comandante (Avoqado → POS, ej. <code>Payment.APPLY</code>) sí escribe en tablas vivas por diseño; es transaccional y corto.</li>
+  </ul>
+
+  <h2><span class="n">5</span>Troubleshooting</h2>
+  <table>
+    <tr><th>Síntoma</th><th>Causa</th><th>Solución</th></tr>
+    <tr><td>Eventos no llegan; van a <code>avoqado_events_dead_letter_queue</code></td><td>Venue no creado en backend (o <code>venueId</code> incorrecto)</td><td>Crear el venue en el backend; usar su id exacto en <code>config.json</code></td></tr>
+    <tr><td>Repetidos <code>configuration.error</code> / venue no ONLINE</td><td>Backend rechaza un <code>venueId</code> desconocido</td><td>Igual que arriba</td></tr>
+    <tr><td>Comandos (<code>Payment.APPLY</code>) no se ejecutan</td><td><code>posType</code> del venue es null</td><td>Poner <code>posType = SOFTRESTAURANT</code></td></tr>
+    <tr><td>Install falla con <code>Msg 1934</code> (QUOTED_IDENTIFIER)</td><td>Script viejo sin el header SET</td><td>Usar el <code>01-COMPLETE-INSTALL.sql</code> actual, o pasar <code>-I</code></td></tr>
+    <tr><td>RabbitMQ <code>403 ACCESS_REFUSED</code></td><td>Credenciales de broker mal/vencidas</td><td>Corregir <code>rabbitMqUrl</code>; servicio y backend deben compartir broker</td></tr>
+    <tr><td>El servicio no arranca</td><td><code>config.json</code> ausente/inválido o falta un campo requerido</td><td>Verificar <code>%ProgramData%\AvoqadoSync\config.json</code> (venueId, rabbitMqUrl, sqlConfig)</td></tr>
+    <tr><td>Heartbeat falla, polling en pausa</td><td>Broker inalcanzable al arrancar</td><td>Levantar el broker; el servicio reintenta y reanuda solo</td></tr>
+  </table>
+
+  <div class="foot">
+    Servicio: <code>Avoqado POS Sync Service</code> · Logs: <code>logs\</code> · Config (prod): <code>%ProgramData%\AvoqadoSync\config.json</code><br>
+    Documento canónico de onboarding — reemplaza al antiguo <code>TECHNICAL_ONBOARDING_GUIDE.md</code>.
+  </div>
+</div>
+</body>
+</html>
