@@ -96,6 +96,8 @@ export interface IPOSAdapter {
   createEmptyOrder(data: OrderCreateData): Promise<{ folio: number }>
   addItemToOrder(folio: number, item: OrderAddItemData): Promise<void>
   cancelOrderItem(folio: number, movementId: number, reason: string, user: string): Promise<void>
+  // Divide una orden: mueve `splitRatio` (0<r<1) de cada línea a una orden hija nueva.
+  splitOrder(parentFolio: number, splitRatio: number): Promise<{ parentFolio: number; childFolio: number }>
 
   // Pagos
   applyPayment(folio: number, payment: PaymentData): Promise<void>

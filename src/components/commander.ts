@@ -102,6 +102,28 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         log.info(`[Comandante] Acción 'addItemToOrder' completada para el folio ${orderFolio}.`)
         break
 
+      case 'OrderItem.CANCEL': {
+        // 🔧 5c: cablear cancelOrderItem (existía pero era inalcanzable desde Avoqado).
+        const { orderFolio: cancelFolio, movementId, reason, user } = payload
+        if (!cancelFolio || movementId == null) {
+          throw new Error("El payload para 'OrderItem.CANCEL' debe incluir 'orderFolio' y 'movementId'.")
+        }
+        await adapter.cancelOrderItem(cancelFolio, movementId, reason ?? 'Cancelado vía Avoqado', user ?? 'AVOQADO')
+        log.info(`[Comandante] Acción 'cancelOrderItem' completada (folio ${cancelFolio}, movimiento ${movementId}).`)
+        break
+      }
+
+      case 'Order.SPLIT': {
+        // 🔧 5c: cablear splitOrder (orquesta los helpers de split que ya existían).
+        const { orderFolio: splitFolio, splitRatio } = payload
+        if (!splitFolio || splitRatio == null) {
+          throw new Error("El payload para 'Order.SPLIT' debe incluir 'orderFolio' y 'splitRatio' (0<r<1).")
+        }
+        const splitResult = await adapter.splitOrder(splitFolio, splitRatio)
+        log.info(`[Comandante] Acción 'splitOrder' completada. Padre: ${splitResult.parentFolio}, Hija: ${splitResult.childFolio}.`)
+        break
+      }
+
       case 'Payment.APPLY':
         // ✅ NUEVO: Manejo de pagos inteligentes
         const { orderExternalId, paymentData } = payload

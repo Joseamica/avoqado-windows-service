@@ -200,6 +200,72 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     }
   }
 
+  /**
+   * 🔧 5c: Divide una orden (split check). Orquesta los helpers existentes
+   * (createSplitOrder + splitOrderItems) en UNA transacción y recalcula ambas
+   * cabeceras desde sus líneas. Mueve `splitRatio` (0<r<1) de cada línea del padre
+   * a una orden hija nueva. Antes estos helpers existían pero no había método público
+   * ni comando que los usara (operación inalcanzable desde Avoqado).
+   */
+  async splitOrder(parentFolio: number, splitRatio: number): Promise<{ parentFolio: number; childFolio: number }> {
+    if (!(splitRatio > 0 && splitRatio < 1)) {
+      throw new Error(`splitRatio debe estar entre 0 y 1 (exclusivo). Recibido: ${splitRatio}`)
+    }
+    log.info(`[Adapter SR11] Dividiendo orden ${parentFolio} con ratio ${splitRatio}...`)
+    const pool = getDbPool()
+    const transaction = new sql.Transaction(pool)
+    try {
+      await transaction.begin()
+
+      const totalRes = await new sql.Request(transaction)
+        .input('folio', sql.BigInt, parentFolio)
+        .query('SELECT total FROM tempcheques WHERE folio=@folio AND pagado=0 AND cancelado=0')
+      if (totalRes.recordset.length === 0) {
+        throw new Error(`Orden padre ${parentFolio} no encontrada o ya pagada/cancelada — no se puede dividir.`)
+      }
+      const parentTotal = Number(totalRes.recordset[0].total)
+
+      // El hijo arranca con el monto proporcional; el recálculo final lo deja exacto.
+      const childFolio = await this.createSplitOrder(parentFolio, parentTotal * splitRatio, transaction)
+      await this.splitOrderItems(parentFolio, childFolio, splitRatio, transaction)
+
+      // Recalcular AMBAS cabeceras desde sus líneas: splitOrderItems mueve líneas pero
+      // no actualiza los totales de cabecera, así que sin esto el padre quedaría inflado.
+      await this.recalcOrderTotals(parentFolio, transaction)
+      await this.recalcOrderTotals(childFolio, transaction)
+
+      await transaction.commit()
+      log.info(`[Adapter SR11] Orden ${parentFolio} dividida. Hija: ${childFolio} (ratio ${splitRatio}).`)
+      return { parentFolio, childFolio }
+    } catch (err: any) {
+      log.error(`[Adapter SR11] Error dividiendo orden ${parentFolio}, haciendo ROLLBACK...`, err.message)
+      await transaction.rollback()
+      throw err
+    }
+  }
+
+  /**
+   * 🔧 5c: Recalcula los totales de cabecera de una orden a partir de sus líneas
+   * (mismo patrón SUM que addItemToOrder/cancelOrderItem). ISNULL(...,0) deja la
+   * orden en 0 si no tiene líneas.
+   */
+  private async recalcOrderTotals(folio: number, transaction: sql.Transaction): Promise<void> {
+    await new sql.Request(transaction).input('folio', sql.BigInt, folio).query(`
+      UPDATE tc SET
+        tc.totalarticulos = ISNULL(det.total_cantidad, 0),
+        tc.subtotal = ISNULL(det.total_precio_sin_imp, 0),
+        tc.totalimpuesto1 = ISNULL(det.total_impuestos, 0),
+        tc.total = ISNULL(det.total_final, 0),
+        tc.totalsindescuento = ISNULL(det.total_precio_sin_imp, 0)
+      FROM tempcheques tc
+      LEFT JOIN (
+        SELECT foliodet, SUM(cantidad) AS total_cantidad, SUM(preciosinimpuestos) AS total_precio_sin_imp,
+               SUM(precio - preciosinimpuestos) AS total_impuestos, SUM(precio) AS total_final
+        FROM tempcheqdet WHERE foliodet = @folio GROUP BY foliodet
+      ) AS det ON tc.folio = det.foliodet
+      WHERE tc.folio = @folio;`)
+  }
+
   // --- MÉTODOS DE PAGOS ---
 
   /**
