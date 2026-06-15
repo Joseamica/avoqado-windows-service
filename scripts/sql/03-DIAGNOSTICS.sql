@@ -385,6 +385,24 @@ PRINT '💡 RunningTotal should equal (originalTotal - SumImporte). ImpliedOrigi
 PRINT '   (RunningTotal + SumImporte) is a sanity figure for manual cross-check.'
 PRINT ''
 
+-- Item-delete volume (H-1 watch)
+PRINT '🗑️ ORDERITEM DELETE VOLUME (H-1 watch)'
+PRINT '--------------------------------------------------------------------'
+PRINT 'orderitem DELETE tracking rows in the last 7 days (informational):'
+
+DECLARE @ItemDeletes7d INT
+SELECT @ItemDeletes7d = COUNT(*)
+FROM AvoqadoTracking
+WHERE EntityType = 'orderitem'
+  AND Operation = 'DELETE'
+  AND Timestamp >= DATEADD(DAY, -7, GETDATE())
+
+PRINT '   orderitem DELETE rows (last 7 days): ' + CAST(@ItemDeletes7d AS VARCHAR)
+PRINT ''
+PRINT '💡 After the H-1 fix, DELETE rows carry the LINE''s WorkspaceId. A sudden'
+PRINT '   spike here can flag mis-firing item removals or cancellation churn.'
+PRINT ''
+
 PRINT '======================================================================'
 PRINT ' DIAGNOSTICS COMPLETE'
 PRINT '======================================================================'

@@ -588,7 +588,7 @@ The service integrates with existing POS tables through trigger-based change tra
 - **`Trg_Avoqado_Orders`** - Tracks order creation, updates, and deletions on `tempcheques`
   - ✅ Improved (v2.5.0): Uses AvoqadoShiftArchiving flag + 30s fallback for shift close protection
   - ✅ More reliable for large shifts with >30 second archiving time
-- **`Trg_Avoqado_OrderItems`** - Tracks individual item changes within orders on `tempcheqdet`
+- **`Trg_Avoqado_OrderItems`** - Tracks individual item changes within orders on `tempcheqdet` (v11/v12: DELETE emite el WorkspaceId de la línea borrada, no el de la orden — H-1 fix)
 - **`Trg_Avoqado_Payments`** - Tracks payment insertions on `tempchequespagos`
 - **`Trg_Avoqado_Shifts`** - Tracks shift opening and closing events on `turnos`
 

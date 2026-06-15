@@ -271,3 +271,150 @@ BEGIN CATCH
     DEALLOCATE cur_clean
 END CATCH
 PRINT ''
+
+-- ====================================================================
+-- TEST 9: REGRESSION — H-1 (orderitem DELETE must emit the LINE's WorkspaceId)
+-- ====================================================================
+-- Trg_Avoqado_OrderItems on a tempcheqdet DELETE must report the deleted
+-- LINE's own WorkspaceId as the orderitem entity-id — NOT the parent ORDER's
+-- WorkspaceId. Before the H-1 fix the DELETE branch passed
+-- (SELECT WorkspaceId FROM tempcheques WHERE folio = d.foliodet), so CREATE and
+-- DELETE tracking rows for the same line carried DIFFERENT entity-ids and the
+-- backend could not locate the removed line.
+--
+-- The trigger inserts into AvoqadoTracking, which carries a filtered index, so the
+-- session MUST run with SET QUOTED_IDENTIFIER ON or the INSERT fails (error 1934).
+SET QUOTED_IDENTIFIER ON;
+GO
+
+PRINT '======================================================================'
+PRINT ' 📋 TEST 9: REGRESSION — Trg_Avoqado_OrderItems DELETE entity-id (H-1)'
+PRINT '======================================================================'
+PRINT ''
+PRINT 'H-1: deleting a tempcheqdet line must produce an orderitem DELETE tracking'
+PRINT '     row whose EntityId = the LINE''s WorkspaceId (and = the CREATE EntityId),'
+PRINT '     NOT the parent order''s WorkspaceId (the OLD bug).'
+PRINT ''
+
+BEGIN TRY
+    -- Self-contained, idempotent setup: drop any leftover from a prior run first.
+    DECLARE @H1Mesa VARCHAR(20) = 'AVOH1TEST'
+    DECLARE @H1PriorFolio BIGINT
+
+    -- Clean up any stale test order(s) from a previous failed run
+    DECLARE cur_h1_prior CURSOR LOCAL FAST_FORWARD FOR
+        SELECT folio FROM tempcheques WHERE mesa = @H1Mesa
+    OPEN cur_h1_prior
+    FETCH NEXT FROM cur_h1_prior INTO @H1PriorFolio
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        DELETE FROM tempchequespagos WHERE folio = @H1PriorFolio
+        DELETE FROM tempcheqdet WHERE foliodet = @H1PriorFolio
+        DELETE FROM tempcheques WHERE folio = @H1PriorFolio
+        DELETE FROM AvoqadoTracking WHERE EntityId LIKE '%:' + CAST(@H1PriorFolio AS VARCHAR) + ':%'
+                                       OR EntityId LIKE '%:' + CAST(@H1PriorFolio AS VARCHAR)
+        DELETE FROM AvoqadoDebugLog WHERE Folio = @H1PriorFolio
+        FETCH NEXT FROM cur_h1_prior INTO @H1PriorFolio
+    END
+    CLOSE cur_h1_prior
+    DEALLOCATE cur_h1_prior
+
+    -- Resolve an open shift (idturno) if one exists; otherwise 0.
+    DECLARE @H1OpenShift BIGINT = (SELECT TOP 1 idturno FROM turnos WHERE cierre IS NULL ORDER BY idturno DESC)
+    DECLARE @H1IdTurno BIGINT = ISNULL(@H1OpenShift, 0)
+
+    -- Build a $50.00 test order. folio is IDENTITY. The order gets its OWN WorkspaceId.
+    DECLARE @H1OrderWs UNIQUEIDENTIFIER = NEWID()
+    INSERT INTO tempcheques (
+        mesa, nopersonas, idmesero, fecha, orden, pagado, cancelado, impreso,
+        idarearestaurant, idempresa, tipodeservicio, idturno,
+        estacion, Usuarioapertura, desc_porc_original, WorkspaceId,
+        total, subtotal, totalimpuesto1, totalarticulos
+    ) VALUES (
+        @H1Mesa, 1, '', GETDATE(), 0, 0, 0, 0,
+        '01', '1', 1, @H1IdTurno,
+        'AVOQADO_SYNC', 'AVOQADO', 0, @H1OrderWs,
+        50.00, 43.10, 6.90, 1
+    )
+
+    DECLARE @H1Folio BIGINT = (SELECT folio FROM tempcheques WHERE WorkspaceId = @H1OrderWs)
+    PRINT '  Created test order folio ' + CAST(@H1Folio AS VARCHAR) + ' (mesa ' + @H1Mesa + ')'
+    PRINT '    Order WorkspaceId = ' + CAST(@H1OrderWs AS VARCHAR(36))
+
+    -- Insert ONE line item; let tempcheqdet.WorkspaceId default to its own newid().
+    -- (The line MUST get a WorkspaceId distinct from the order's for this test.)
+    INSERT INTO tempcheqdet (foliodet, movimiento, idproducto, cantidad, precio, preciosinimpuestos, hora, idestacion, impuesto1, idmeseroproducto, comentario)
+    VALUES (@H1Folio, 1, ISNULL((SELECT TOP 1 idproducto FROM productos WHERE idproducto = 'AVOTEST'), (SELECT TOP 1 idproducto FROM productos)), 1, 50.00, 43.10, GETDATE(), 'AVOQADO_SYNC', 16.00, '', '')
+
+    -- Capture the LINE's own WorkspaceId (defaulted to newid()).
+    DECLARE @H1LineWs UNIQUEIDENTIFIER = (SELECT TOP 1 WorkspaceId FROM tempcheqdet WHERE foliodet = @H1Folio AND movimiento = 1)
+    PRINT '    Line  WorkspaceId = ' + ISNULL(CAST(@H1LineWs AS VARCHAR(36)), '(NULL — no DEFAULT on tempcheqdet.WorkspaceId)')
+
+    -- Read the orderitem CREATE tracking entity-id produced by the INSERT trigger.
+    DECLARE @H1CreateEntityId VARCHAR(200) = (
+        SELECT TOP 1 EntityId FROM AvoqadoTracking
+        WHERE EntityType = 'orderitem' AND Operation = 'CREATE'
+          AND EntityId = CAST(@H1LineWs AS VARCHAR(36))
+        ORDER BY Id DESC
+    )
+    PRINT '    orderitem CREATE EntityId = ' + ISNULL(@H1CreateEntityId, '(none found)')
+
+    -- ---- Trigger the DELETE branch of Trg_Avoqado_OrderItems ----
+    DELETE FROM tempcheqdet WHERE foliodet = @H1Folio AND movimiento = 1
+
+    -- Read the newest orderitem DELETE tracking entity-id.
+    DECLARE @H1DeleteEntityId VARCHAR(200) = (
+        SELECT TOP 1 EntityId FROM AvoqadoTracking
+        WHERE EntityType = 'orderitem' AND Operation = 'DELETE'
+        ORDER BY Id DESC
+    )
+    PRINT '    orderitem DELETE EntityId = ' + ISNULL(@H1DeleteEntityId, '(none found)')
+
+    PRINT ''
+    PRINT '  Expected DELETE EntityId = LINE WorkspaceId  = ' + ISNULL(CAST(@H1LineWs AS VARCHAR(36)), '(NULL)')
+    PRINT '  WRONG (old bug)          = ORDER WorkspaceId = ' + CAST(@H1OrderWs AS VARCHAR(36))
+
+    -- ---- H-1 assertion ----
+    IF @H1DeleteEntityId = CAST(@H1OrderWs AS VARCHAR(36))
+        PRINT '    ❌ H-1 FAIL: DELETE EntityId = the ORDER''s WorkspaceId — the OLD bug is back!'
+    ELSE IF @H1DeleteEntityId = CAST(@H1LineWs AS VARCHAR(36))
+         AND (@H1CreateEntityId IS NULL OR @H1DeleteEntityId = @H1CreateEntityId)
+        PRINT '    ✅ H-1 PASS: DELETE EntityId = the LINE''s WorkspaceId (matches CREATE)'
+    ELSE IF @H1DeleteEntityId IS NULL
+        PRINT '    ⚠️ H-1 INCONCLUSIVE: no orderitem DELETE tracking row found (trigger fired? QUOTED_IDENTIFIER?)'
+    ELSE
+        PRINT '    ❌ H-1 FAIL: DELETE EntityId=' + @H1DeleteEntityId
+            + ' matches neither line nor order WorkspaceId (or CREATE mismatch)'
+
+    -- ---- CLEAN UP the test order and the rows it generated ----
+    DELETE FROM tempchequespagos WHERE folio = @H1Folio
+    DELETE FROM tempcheqdet WHERE foliodet = @H1Folio
+    DELETE FROM AvoqadoTracking WHERE EntityId = CAST(@H1OrderWs AS VARCHAR(36))
+                                   OR EntityId = CAST(@H1LineWs AS VARCHAR(36))
+                                   OR EntityId LIKE '%:' + CAST(@H1Folio AS VARCHAR) + ':%'
+                                   OR EntityId LIKE '%:' + CAST(@H1Folio AS VARCHAR)
+    DELETE FROM AvoqadoDebugLog WHERE Folio = @H1Folio
+    DELETE FROM tempcheques WHERE folio = @H1Folio
+    PRINT ''
+    PRINT '  🧹 Cleaned up test order folio ' + CAST(@H1Folio AS VARCHAR) + ' (tempcheques/tempcheqdet/tempchequespagos/AvoqadoTracking/AvoqadoDebugLog)'
+END TRY
+BEGIN CATCH
+    PRINT '  ❌ TEST 9 ERROR: ' + ERROR_MESSAGE()
+    -- Best-effort cleanup on failure
+    DECLARE @H1CleanFolio BIGINT
+    DECLARE cur_h1_clean CURSOR LOCAL FAST_FORWARD FOR
+        SELECT folio FROM tempcheques WHERE mesa = 'AVOH1TEST'
+    OPEN cur_h1_clean
+    FETCH NEXT FROM cur_h1_clean INTO @H1CleanFolio
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        DELETE FROM tempchequespagos WHERE folio = @H1CleanFolio
+        DELETE FROM tempcheqdet WHERE foliodet = @H1CleanFolio
+        DELETE FROM AvoqadoDebugLog WHERE Folio = @H1CleanFolio
+        DELETE FROM tempcheques WHERE folio = @H1CleanFolio
+        FETCH NEXT FROM cur_h1_clean INTO @H1CleanFolio
+    END
+    CLOSE cur_h1_clean
+    DEALLOCATE cur_h1_clean
+END CATCH
+PRINT ''

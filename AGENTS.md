@@ -79,6 +79,7 @@
 ## SQL Toolkit
 - `scripts/sql/README-SCRIPTS.md` describes the rollout order: verification, diagnostics, cleanup, installation, testing, fixes.
 - Key scripts (`01-COMPLETE-INSTALL.sql`, `02-TESTING.sql`, `03-DIAGNOSTICS.sql`, etc.) provision triggers, functions, and stored procedures required by the producer.
+- `Trg_Avoqado_OrderItems` tracks item changes on `tempcheqdet` (v11/v12: DELETE emite el WorkspaceId de la línea borrada, no el de la orden — H-1 fix).
 - All scripts assume SQL Server 2014 compatibility and the presence of the SoftRestaurant schema documented in `docs/`.
 
 ## Documentation Synchronization Rule

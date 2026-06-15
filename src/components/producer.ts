@@ -577,6 +577,12 @@ async function processOrderChangeV10(change: ChangeNotification, venueId: string
       orderData: {
         externalId: change.EntityId,
         orderNumber: posData.folio.toString(),
+        // 🔧 H-2: surface the printed check number and print state. `folio` is the internal PK; `numcheque`
+        // is the number printed on the ticket (used by corte de caja and fiscal cross-references). The
+        // impreso 0->1 transition was previously invisible (only inside posRawData).
+        posCheckNumber: posData.numcheque ? posData.numcheque.toString() : null,
+        printed: !!posData.impreso,
+        printCount: parseFloat(posData.impresiones || 0),
         status: posData.cancelado ? 'CANCELLED' : posData.pagado ? 'COMPLETED' : 'CONFIRMED',
         paymentStatus: posData.pagado ? 'PAID' : 'PENDING',
         subtotal: parseFloat(posData.subtotal || 0),
@@ -695,6 +701,12 @@ async function processOrderChangeV11(
       orderData: {
         externalId: change.EntityId, // This is the WorkspaceId
         orderNumber: posData.folio.toString(),
+        // 🔧 H-2: surface the printed check number and print state. `folio` is the internal PK; `numcheque`
+        // is the number printed on the ticket (used by corte de caja and fiscal cross-references). The
+        // impreso 0->1 transition was previously invisible (only inside posRawData).
+        posCheckNumber: posData.numcheque ? posData.numcheque.toString() : null,
+        printed: !!posData.impreso,
+        printCount: parseFloat(posData.impresiones || 0),
         status: posData.cancelado ? 'CANCELLED' : posData.pagado ? 'COMPLETED' : 'CONFIRMED',
         paymentStatus: posData.pagado ? 'PAID' : 'PENDING',
         subtotal: parseFloat(posData.subtotal || 0),

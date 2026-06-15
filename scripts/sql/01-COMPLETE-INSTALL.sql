@@ -721,7 +721,11 @@ BEGIN
         INSERT INTO AvoqadoTracking (EntityType, EntityId, Operation, RetryCount)
         SELECT DISTINCT 'orderitem',
             CASE WHEN i.movimiento IS NULL AND d.movimiento IS NOT NULL
-                THEN dbo.fn_GetAvoqadoEntityIdWithWorkspace('orderitem', d.foliodet, (SELECT idturno FROM tempcheques WHERE folio = d.foliodet), d.movimiento, (SELECT WorkspaceId FROM tempcheques WHERE folio = d.foliodet))
+                -- 🔧 H-1 FIX: on DELETE the orderitem entity-id must be the LINE's own WorkspaceId
+                -- (d.WorkspaceId from the deleted row), NOT the order's. Passing tempcheques.WorkspaceId
+                -- made the DELETE id mismatch the CREATE/UPDATE id, so the backend could not locate the
+                -- deleted line (or removed the wrong one) on every v11/v12 venue.
+                THEN dbo.fn_GetAvoqadoEntityIdWithWorkspace('orderitem', d.foliodet, (SELECT idturno FROM tempcheques WHERE folio = d.foliodet), d.movimiento, d.WorkspaceId)
                 ELSE dbo.fn_GetAvoqadoEntityIdWithWorkspace('orderitem', COALESCE(i.foliodet, d.foliodet), (SELECT idturno FROM tempcheques WHERE folio = COALESCE(i.foliodet, d.foliodet)), COALESCE(i.movimiento, d.movimiento), NULL)
             END,
             CASE WHEN i.movimiento IS NOT NULL AND d.movimiento IS NOT NULL THEN 'UPDATE'

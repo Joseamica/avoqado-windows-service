@@ -285,12 +285,14 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 ### 🟠 HIGH
 
 #### H-1 · Item DELETE v11 emite el WorkspaceId de la ORDEN como EntityId del item
+- **✅ ARREGLADO (2026-06-15):** el trigger Trg_Avoqado_OrderItems en DELETE ahora pasa `d.WorkspaceId` (el de la línea), no el de la orden. Validado en vivo: entity-id de CREATE y DELETE coinciden (= WorkspaceId de la línea).
 - **Área:** Modificadores/items · **Categoría:** entity-id
 - **Evidencia:** `01-COMPLETE-INSTALL.sql:704-705` pasa `(SELECT WorkspaceId FROM tempcheques WHERE folio=d.foliodet)` como 5º arg; `fn_GetAvoqadoEntityIdWithWorkspace:296-313` corta el lookup si `@WorkspaceId` no es NULL y devuelve el GUID de la orden; `producer.ts:785-788` solo replica `EntityId`.
 - **Problema:** CREATE/UPDATE de la línea llevan el GUID de la **línea**; el DELETE lleva el GUID de la **orden**. No coinciden → el backend no puede ubicar la línea borrada. Rompe quitar producto/modificador/curso en **toda venue v11/v12** (ruta dominante).
 - **Recomendación:** en la rama DELETE pasar `d.WorkspaceId` (la propia línea borrada), no `tempcheques.WorkspaceId`. Verificar que `tempcheqdet` expone `WorkspaceId` en `deleted`. Validar en vivo: borrar una línea en avov2 y aseverar que el EntityId DELETE = `tempcheqdet.WorkspaceId` de esa línea.
 
 #### H-2 · `numcheque` (número de cheque impreso) nunca se expone como campo de primer nivel
+- **✅ ARREGLADO (2026-06-15):** el producer expone `posCheckNumber`(=numcheque), `printed`(=impreso), `printCount`(=impresiones) en el payload de orden (v10 y v11).
 - **Área:** Imprimir cuenta · **Categoría:** data-fidelity
 - **Evidencia:** `producer.ts:545` (V10 `orderNumber=posData.folio.toString()`), `:662` (V11 igual). `numcheque` solo en `posRawData`.
 - **Problema:** `folio` (PK interno) ≠ `numcheque` (número impreso en el ticket que usa el corte). Publicar `folio` como `orderNumber` rompe conciliación, soporte y cruces fiscales. La transición impreso 0→1 también es invisible.
@@ -327,6 +329,7 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 - **Recomendación:** no depender de que el POS llame el SP. Detectar intención de cierre estructuralmente (suprimir DELETEs de órdenes `pagado=1` cuando hay `turnos` cerrándose), o tratar DELETE de orden pagada como archival por defecto exigiendo señal explícita para cancelaciones reales. Validar con captura en vivo midiendo el gap entre DELETEs y el UPDATE de `cierre`.
 
 #### H-6 · Propina doble-contada / no separada de `importe`
+- **◑ PARCIAL (2026-06-15):** el doble-conteo de propina ya NO ocurre — el fix de C-1 + el contrato del adapter (amount y tip son params separados, amount excluye propina) lo resuelven. PENDIENTE (diferido): poblar buckets propina/efectivo/tarjeta en el header en pago full para el corte de caja — entrelazado con el rediseño de 'no encoger el total' + requiere captura del corte nativo.
 - **Área:** Pago/liquidación · **Categoría:** producer-logic
 - **Evidencia:** `01-COMPLETE-INSTALL.sql:430-431` (`@PaidSoFar=SUM(importe)`, restante usa importe crudo), `:443-444` (`importe=@PaymentAmount`, `propina=@TipAmount`, sin resta); contraste `04-Native-Payment-Flow.sql:223` (`importe=@PaymentAmount-@TipAmount`).
 - **Problema:** si `@PaymentAmount` incluye propina, `importe` se infla, `@PaidSoFar` sobre-cuenta y el restante se subestima → cierre prematuro/subcobro en split tender. El FULL nunca escribe `propina/propinatarjeta/totalconpropina` en `tempcheques` → corte de caja descuadra para órdenes pagadas por Avoqado.
