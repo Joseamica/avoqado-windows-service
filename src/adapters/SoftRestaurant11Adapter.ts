@@ -1,6 +1,7 @@
 import sql from 'mssql'
 import { getDbPool } from '../core/db'
 import { log } from '../core/logger'
+import { getIvaRate, detectUsesWorkspaceId, getDefaultEmpresa } from '../core/posMeta'
 import { createEmptyOrder } from '../services/Orders/createEmptyOrder'
 import {
   IPOSAdapter,
@@ -52,18 +53,21 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       await transaction.begin()
 
       const movResult = await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .query('SELECT ISNULL(MAX(movimiento), 0) as maxMovimiento FROM tempcheqdet WHERE foliodet = @folio')
       const nextMovement = movResult.recordset[0].maxMovimiento + 1
 
-      const priceWithoutTax = item.price / 1.16
+      // 🔧 5d: IVA leído de parametros.impuesto1 (antes hardcodeado 1.16 / 16.00, lo
+      // que daba precio-sin-impuesto e impuesto1 MAL en venues con tasa != 16%).
+      const ivaRate = await getIvaRate(pool)
+      const priceWithoutTax = item.price / (1 + ivaRate / 100)
 
       const insertQuery = `
-        INSERT INTO tempcheqdet (foliodet, movimiento, idproducto, cantidad, precio, preciosinimpuestos, hora, idestacion, impuesto1, idmeseroproducto, comentario) 
-        VALUES (@folio, @movimiento, @idproducto, @cantidad, @precio, @preciosinimpuestos, GETDATE(), 'AVOQADO_SYNC', 16.00, @idmesero, @comentario)
+        INSERT INTO tempcheqdet (foliodet, movimiento, idproducto, cantidad, precio, preciosinimpuestos, hora, idestacion, impuesto1, idmeseroproducto, comentario)
+        VALUES (@folio, @movimiento, @idproducto, @cantidad, @precio, @preciosinimpuestos, GETDATE(), 'AVOQADO_SYNC', @impuesto1, @idmesero, @comentario)
       `
       await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .input('movimiento', sql.Int, nextMovement)
         .input('idproducto', sql.VarChar, actualPosProductId)
         .input('cantidad', sql.Int, item.quantity)
@@ -72,6 +76,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         // se multiplica por cantidad aquí (antes duplicaba totales con cantidad>1).
         .input('precio', sql.Money, item.price)
         .input('preciosinimpuestos', sql.Money, priceWithoutTax)
+        .input('impuesto1', sql.Decimal(9, 2), ivaRate)
         .input('idmesero', sql.VarChar, item.waiterPosId)
         .input('comentario', sql.VarChar, item.notes || '')
         .query(insertQuery)
@@ -106,7 +111,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         WHERE 
           tc.folio = @folio;
       `
-      await new sql.Request(transaction).input('folio', sql.Int, folio).query(updateTotalsQuery)
+      await new sql.Request(transaction).input('folio', sql.BigInt, folio).query(updateTotalsQuery)
 
       log.info(`[Adapter SR11] Totales para el folio ${folio} recalculados y actualizados.`)
 
@@ -134,7 +139,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       await transaction.begin()
 
       const itemDataResult = await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .input('movimiento', sql.Int, movementId)
         .query('SELECT idproducto, cantidad, precio FROM tempcheqdet WHERE foliodet = @folio AND movimiento = @movimiento')
 
@@ -143,18 +148,18 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       const itemData = itemDataResult.recordset[0]
 
       await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .input('idproducto', sql.VarChar, itemData.idproducto)
         .input('movimiento', sql.Int, movementId)
         .query('UPDATE productosenproduccion SET cancelado=1 WHERE folio=@folio AND idproducto=@idproducto AND movimiento=@movimiento')
 
       await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .input('movimiento', sql.Int, movementId)
         .query('DELETE FROM tempcheqdet WHERE foliodet=@folio AND movimiento=@movimiento')
 
       await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .input('cantidad', sql.Int, itemData.cantidad)
         .input('idproducto', sql.VarChar, itemData.idproducto)
         .input('razon', sql.VarChar, reason)
@@ -203,15 +208,18 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   async applyPayment(folio: number, payment: PaymentData): Promise<void> {
     log.info(`[Adapter SR11] Aplicando pago de ${payment.amount} al folio ${folio}...`)
     const pool = getDbPool()
+    // 🔧 5d: la query tenía placeholders '...' (T-SQL inválido) → SIEMPRE reventaba. Se corrige a
+    // un INSERT real con las mismas columnas que insertPaymentToPOS. (Hoy el comando Payment.APPLY
+    // usa applyIntelligentPayment/sp_ApplyPartialPayment; este método queda correcto por si se cablea.)
     await pool
       .request()
-      .input('folio', sql.Int, folio)
+      .input('folio', sql.BigInt, folio)
       .input('idformadepago', sql.VarChar, payment.posPaymentMethodId)
       .input('importe', sql.Money, payment.amount)
       .input('propina', sql.Money, payment.tip)
       .input('referencia', sql.VarChar, payment.reference || '')
       .query(
-        'INSERT INTO tempchequespagos (folio, idformadepago, importe, propina, referencia, ...) VALUES (@folio, @idformadepago, @importe, @propina, @referencia, ...)',
+        'INSERT INTO tempchequespagos (folio, idformadepago, importe, propina, referencia) VALUES (@folio, @idformadepago, @importe, @propina, @referencia)',
       )
   }
 
@@ -228,7 +236,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       const nextCheckNumber = folioResult.recordset[0].ultimofolio + 1
 
       await new sql.Request(transaction)
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .input('numcheque', sql.Int, nextCheckNumber)
         .query('UPDATE tempcheques SET pagado=1, impreso=1, numcheque=@numcheque, cierre=GETDATE() WHERE folio=@folio')
 
@@ -236,7 +244,9 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('nextCheckNumber', sql.Int, nextCheckNumber)
         .query("UPDATE folios SET ultimofolio = @nextCheckNumber WHERE serie=''")
 
-      await new sql.Request(transaction).input('folio', sql.Int, folio).query('UPDATE cuentas SET procesado = 1 WHERE foliocuenta = @folio')
+      await new sql.Request(transaction)
+        .input('folio', sql.BigInt, folio)
+        .query('UPDATE cuentas SET procesado = 1 WHERE foliocuenta = @folio')
 
       await transaction.commit()
       log.info(`[Adapter SR11] Orden folio ${folio} cerrada exitosamente con número de cheque ${nextCheckNumber}.`)
@@ -254,13 +264,25 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   async openShift(data: ShiftOpenData): Promise<{ shiftId: number; staffName: string }> {
     log.info(`[Adapter SR11] Abriendo nuevo turno para el cajero ${data.posStaffId}...`)
     const pool = getDbPool()
+    // 🔧 5d: turnos lleva WorkspaceId en v11/v12 pero NO en v10 → el INSERT con NEWID()
+    // reventaba en v10 (Shift.OPEN roto). Ramificamos por presencia de la columna.
+    // idempresa también estaba hardcodeada '1'; ahora se lee (fallback '1').
+    const usesWorkspaceId = await detectUsesWorkspaceId(pool)
+    const idempresa = await getDefaultEmpresa(pool)
     const transaction = new sql.Transaction(pool)
     try {
       await transaction.begin()
 
-      // Obtenemos el siguiente ID para el turno. Asumimos que es un secuencial.
-      const idResult = await new sql.Request(transaction).query('SELECT ISNULL(MAX(idturno), 0) + 1 as nextId FROM turnos')
-      const nextShiftId = idResult.recordset[0].nextId
+      // 🔧 5d: el siguiente idturno se calcula contra MAX(turnos) Y parametros.ultimoturno
+      // (el contador nativo) para no colisionar con un turno que el POS nativo acabe de emitir.
+      // Antes solo miraba MAX(turnos), lo que podía reusar un id ya entregado por el POS.
+      const idResult = await new sql.Request(transaction).query(
+        `SELECT CAST(ISNULL((SELECT MAX(idturno) FROM turnos), 0) AS BIGINT) AS maxTurno,
+                CAST(ISNULL((SELECT MAX(ultimoturno) FROM parametros), 0) AS BIGINT) AS ultimoTurno`,
+      )
+      const maxTurno = Number(idResult.recordset[0].maxTurno)
+      const ultimoTurno = Number(idResult.recordset[0].ultimoTurno)
+      const nextShiftId = Math.max(maxTurno, ultimoTurno) + 1
 
       // Look up staff name if available
       let staffName = data.posStaffId // Default to ID if name not found
@@ -272,19 +294,21 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         staffName = staffResult.recordset[0].nombre
       }
 
-      const insertQuery = `
-        INSERT INTO turnos (idturno, fondo, apertura, idestacion, cajero, idempresa, idmesero, WorkspaceId)
-        VALUES (@idturno, @fondo, GETDATE(), @idestacion, @cajero, '1', '', NEWID())
-      `
+      const insertQuery = usesWorkspaceId
+        ? `INSERT INTO turnos (idturno, fondo, apertura, idestacion, cajero, idempresa, idmesero, WorkspaceId)
+           VALUES (@idturno, @fondo, GETDATE(), @idestacion, @cajero, @idempresa, '', NEWID())`
+        : `INSERT INTO turnos (idturno, fondo, apertura, idestacion, cajero, idempresa, idmesero)
+           VALUES (@idturno, @fondo, GETDATE(), @idestacion, @cajero, @idempresa, '')`
       await new sql.Request(transaction)
-        .input('idturno', sql.Int, nextShiftId)
+        .input('idturno', sql.BigInt, nextShiftId)
         .input('fondo', sql.Money, data.startingCash)
         .input('cajero', sql.VarChar, data.posStaffId)
         .input('idestacion', sql.VarChar, data.stationId || 'AVOQADO_SYNC')
+        .input('idempresa', sql.VarChar, idempresa)
         .query(insertQuery)
 
       await new sql.Request(transaction)
-        .input('nextShiftId', sql.Int, nextShiftId)
+        .input('nextShiftId', sql.BigInt, nextShiftId)
         .query('UPDATE parametros SET ultimoturno = @nextShiftId')
 
       await transaction.commit()
