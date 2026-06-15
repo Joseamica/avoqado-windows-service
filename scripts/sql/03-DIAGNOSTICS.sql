@@ -460,6 +460,31 @@ IF @DebugLogRows = 0
 
 PRINT ''
 
+-- AvoqadoProcessedCommands size (idempotency-store growth watch)
+PRINT '🧾 AvoqadoProcessedCommands SIZE (idempotency-store growth watch)'
+PRINT '--------------------------------------------------------------------'
+PRINT 'The Commander records each handled command (deduped by CommandKey) here.'
+PRINT 'sp_CleanupOldTrackingRecords prunes it (ProcessedAt < cutoff); a large/old'
+PRINT 'set here means cleanup is overdue.'
+PRINT ''
+
+IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NULL
+    PRINT '⚠️ AvoqadoProcessedCommands table not found (install 01-COMPLETE-INSTALL.sql)'
+ELSE
+BEGIN
+    DECLARE @ProcCmdRows INT, @ProcCmdOldest DATETIME2
+    SELECT @ProcCmdRows = COUNT(*) FROM AvoqadoProcessedCommands
+    SELECT @ProcCmdOldest = MIN(ProcessedAt) FROM AvoqadoProcessedCommands
+
+    PRINT 'AvoqadoProcessedCommands total rows: ' + CAST(@ProcCmdRows AS VARCHAR)
+    PRINT 'AvoqadoProcessedCommands oldest ProcessedAt: ' + ISNULL(CONVERT(VARCHAR(30), @ProcCmdOldest, 121), '(empty)')
+
+    IF @ProcCmdRows = 0
+        PRINT '✅ none'
+END
+
+PRINT ''
+
 PRINT '======================================================================'
 PRINT ' DIAGNOSTICS COMPLETE'
 PRINT '======================================================================'

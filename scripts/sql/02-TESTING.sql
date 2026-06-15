@@ -418,3 +418,48 @@ BEGIN CATCH
     DEALLOCATE cur_h1_clean
 END CATCH
 PRINT ''
+
+-- ====================================================================
+-- TEST 10: COMMAND IDEMPOTENCY STORE — AvoqadoProcessedCommands (Fase 5a-2)
+-- ====================================================================
+-- The Commander de-duplicates each command by CommandKey against
+-- AvoqadoProcessedCommands (messageId / commandId / idempotencyKey). This test
+-- asserts the table exists and is writable: insert a dummy CommandKey, assert a
+-- SELECT finds it, then delete it.
+SET QUOTED_IDENTIFIER ON;
+GO
+
+PRINT '======================================================================'
+PRINT ' 📋 TEST 10: AvoqadoProcessedCommands (command idempotency store)'
+PRINT '======================================================================'
+PRINT ''
+
+IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NULL
+    PRINT '  ❌ TEST 10 FAIL: AvoqadoProcessedCommands table is MISSING'
+ELSE
+BEGIN TRY
+    DECLARE @TestCommandKey VARCHAR(200) = 'AVO-IDEMP-TEST-' + CONVERT(VARCHAR(36), NEWID())
+
+    -- Clean any stale row from a prior run (defensive)
+    DELETE FROM AvoqadoProcessedCommands WHERE CommandKey = @TestCommandKey
+
+    -- Insert a dummy processed-command marker
+    INSERT INTO AvoqadoProcessedCommands (CommandKey, Entity, Action)
+    VALUES (@TestCommandKey, 'test', 'noop')
+    PRINT '  Inserted dummy CommandKey: ' + @TestCommandKey
+
+    -- Assert the SELECT finds it
+    DECLARE @Found INT = (SELECT COUNT(*) FROM AvoqadoProcessedCommands WHERE CommandKey = @TestCommandKey)
+    IF @Found = 1
+        PRINT '  ✅ TEST 10 PASS: AvoqadoProcessedCommands exists and is writable (insert + select OK)'
+    ELSE
+        PRINT '  ❌ TEST 10 FAIL: inserted CommandKey not found (expected 1, got ' + CAST(@Found AS VARCHAR) + ')'
+
+    -- Clean up the dummy row
+    DELETE FROM AvoqadoProcessedCommands WHERE CommandKey = @TestCommandKey
+    PRINT '  🧹 Cleaned up dummy CommandKey'
+END TRY
+BEGIN CATCH
+    PRINT '  ❌ TEST 10 ERROR: ' + ERROR_MESSAGE()
+END CATCH
+PRINT ''

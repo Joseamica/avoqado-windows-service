@@ -268,6 +268,20 @@ CREATE TABLE AvoqadoShiftArchiving (
 CREATE INDEX IX_ShiftArchiving_Active ON AvoqadoShiftArchiving(IsArchiving, StartedAt) WHERE IsArchiving = 1
 PRINT '  ✅ Created AvoqadoShiftArchiving'
 
+-- 🔧 5a-2: idempotencia de comandos (Avoqado->POS). RabbitMQ es at-least-once; un comando
+-- redelivered (mismo CommandKey = messageId / payload.commandId / payload.idempotencyKey que envía
+-- el backend) NO debe re-ejecutarse (duplicaría órdenes/items/turnos/pagos). El Commander registra
+-- aquí cada comando aplicado y omite los repetidos. Requiere que el backend mande un id por comando.
+IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NOT NULL DROP TABLE AvoqadoProcessedCommands
+CREATE TABLE AvoqadoProcessedCommands (
+    CommandKey VARCHAR(200) PRIMARY KEY,
+    Entity VARCHAR(50) NULL,
+    Action VARCHAR(50) NULL,
+    ProcessedAt DATETIME2 DEFAULT GETUTCDATE()
+)
+CREATE INDEX IX_ProcessedCommands_At ON AvoqadoProcessedCommands(ProcessedAt)
+PRINT '  ✅ Created AvoqadoProcessedCommands'
+
 PRINT ''
 
 -- =====================================================
@@ -644,6 +658,15 @@ AS BEGIN
         DELETE FROM AvoqadoDebugLog WHERE Timestamp < @CutoffDate
         SET @DeletedCount = @@ROWCOUNT
         PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old AvoqadoDebugLog rows'
+    END
+
+    -- Prune old command-idempotency keys (5a-2). Safe: a redelivery older than the retention
+    -- window is far beyond any realistic broker retry, so re-dedup is moot.
+    IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NOT NULL
+    BEGIN
+        DELETE FROM AvoqadoProcessedCommands WHERE ProcessedAt < @CutoffDate
+        SET @DeletedCount = @@ROWCOUNT
+        PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old AvoqadoProcessedCommands rows'
     END
 END
 GO

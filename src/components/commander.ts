@@ -19,6 +19,8 @@ import {
 } from '../adapters/IPosAdapter'
 import { SoftRestaurant11Adapter } from '../adapters/SoftRestaurant11Adapter'
 import { loadConfig } from '../config'
+import { getDbPool } from '../core/db'
+import sql from 'mssql'
 
 let adapter: IPOSAdapter
 let reconnectHandlerRegistered = false
@@ -51,6 +53,33 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
     log.info(`[Comandante] Comando recibido: ${routingKey}`)
     const { entity, action, payload } = commandMessage
     log.info(`[Comandante] Despachando acción: ${entity}.${action}`)
+
+    // 🔧 5a-2: idempotencia de comandos. Key estable = messageId (AMQP) / commandId / idempotencyKey
+    // que envíe el backend. Sin id NO se puede de-duplicar con seguridad (dos comandos legítimos
+    // idénticos colisionarían), así que en ese caso seguimos SIN dedup (fail-open + aviso).
+    const commandKey: string | null =
+      msg.properties?.messageId || commandMessage?.commandId || payload?.commandId || payload?.idempotencyKey || null
+    if (commandKey) {
+      try {
+        const dup = await getDbPool()
+          .request()
+          .input('k', sql.VarChar(200), String(commandKey))
+          .query('SELECT 1 AS x FROM AvoqadoProcessedCommands WHERE CommandKey = @k')
+        if (dup.recordset.length > 0) {
+          log.warn(`[Comandante] Comando ${commandKey} (${entity}.${action}) ya aplicado — idempotente: ack y skip.`)
+          channel.ack(msg)
+          return
+        }
+      } catch (dedupErr: any) {
+        log.warn(
+          `[Comandante] Dedup no disponible (¿falta AvoqadoProcessedCommands?); procediendo sin idempotencia: ${dedupErr?.message ?? dedupErr}`,
+        )
+      }
+    } else {
+      log.warn(
+        `[Comandante] Comando ${entity}.${action} SIN id (messageId/commandId/idempotencyKey): sin protección de idempotencia. El backend debería enviar un id único por comando.`,
+      )
+    }
 
     const keyParts = routingKey.split('.')
     if (keyParts[0] !== 'command' || keyParts.length !== 3) {
@@ -143,6 +172,22 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         // 🔧 5a: comando desconocido NO se ack-ea en silencio (antes se perdía). Lanzamos para que
         // el catch lo mande a la DLQ de comandos, donde queda visible para diagnóstico/replay.
         throw new Error(`No hay un manejador para el comando: ${entity}.${action}`)
+    }
+
+    // 🔧 5a-2: registrar el comando aplicado para que un redelivery (at-least-once) no lo repita.
+    if (commandKey) {
+      try {
+        await getDbPool()
+          .request()
+          .input('k', sql.VarChar(200), String(commandKey))
+          .input('e', sql.VarChar(50), String(entity ?? '').slice(0, 50))
+          .input('a', sql.VarChar(50), String(action ?? '').slice(0, 50))
+          .query(
+            'IF NOT EXISTS (SELECT 1 FROM AvoqadoProcessedCommands WHERE CommandKey=@k) INSERT INTO AvoqadoProcessedCommands (CommandKey, Entity, Action) VALUES (@k, @e, @a)',
+          )
+      } catch (recErr: any) {
+        log.warn(`[Comandante] No se pudo registrar el command key ${commandKey} (idempotencia): ${recErr?.message ?? recErr}`)
+      }
     }
 
     channel.ack(msg)

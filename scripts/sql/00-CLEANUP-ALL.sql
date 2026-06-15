@@ -114,6 +114,12 @@ BEGIN
 END
 
 -- Drop tables (in order to handle dependencies)
+IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NOT NULL
+BEGIN
+    DROP TABLE AvoqadoProcessedCommands
+    PRINT '✅ Dropped AvoqadoProcessedCommands'
+END
+
 IF OBJECT_ID('AvoqadoShiftArchiving', 'U') IS NOT NULL
 BEGIN
     DROP TABLE AvoqadoShiftArchiving

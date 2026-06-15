@@ -535,6 +535,8 @@ SELECT cortezinicio, cortezfin, cortezfindiasiguiente FROM configuracion
   - Indexed on Timestamp + EntityType for performance
   - Tracks Operation (CREATE, UPDATE, DELETE) and ProcessedAt timestamp
 - **`AvoqadoCommands`** - Command queue for Avoqado → POS operations
+- **`AvoqadoProcessedCommands`** - Command-idempotency store. Each Avoqado → POS command the Commander handles is recorded here (deduped by `CommandKey` = `messageId` / `commandId` / `idempotencyKey`); a redelivered command whose key already exists is skipped (acked, not re-applied). Pruned by `sp_CleanupOldTrackingRecords` (`ProcessedAt < cutoff`).
+  - **Note:** the commands queue (`pos_commands_exchange`) now has a dead-letter queue (`avoqado_commands_dead_letter_queue`); failed/unknown/invalid-JSON commands are preserved in the DLQ instead of being silently dropped.
 
 **New Tables (v2.5.0):**
 
@@ -583,6 +585,7 @@ The service integrates with existing POS tables through trigger-based change tra
   - Deletes trigger errors (RetryCount=99) older than @DaysToKeep days
   - Deletes failed records (RetryCount>=5) older than @DaysToKeep days
   - Also prunes AvoqadoDebugLog rows older than @DaysToKeep days (it grew unbounded before)
+  - Also prunes AvoqadoProcessedCommands rows older than @DaysToKeep days (idempotency store)
 
 #### Database Triggers (SQL Server 2014 Compatible)
 

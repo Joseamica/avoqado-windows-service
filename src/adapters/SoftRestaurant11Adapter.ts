@@ -12,7 +12,7 @@ import {
   IntelligentPaymentData,
   PaymentResult,
   FastPaymentData,
-  FastPaymentResult
+  FastPaymentResult,
 } from './IPosAdapter'
 
 export class SoftRestaurant11Adapter implements IPOSAdapter {
@@ -164,15 +164,30 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
           'INSERT INTO tempcancela (foliocheque, cantidad, clave, razon, fecha, usuario, precio) VALUES (@folio, @cantidad, @idproducto, @razon, GETDATE(), @usuario, @precio)',
         )
 
-      await new sql.Request(transaction)
-        .input('evento', sql.VarChar, `Cancelación de producto en folio ${folio}`)
-        .input('valores', sql.VarChar, `Producto: ${itemData.idproducto}, Razón: ${reason}`)
-        .input('usuario', sql.VarChar, user)
-        .query('INSERT INTO bitacorasistema (fecha, usuario, evento, valores, ...) VALUES(GETDATE(), @usuario, @evento, @valores, ...)')
+      // 🔧 5b: bitacorasistema INSERT eliminado — tenía placeholders '...' (T-SQL inválido) que hacían
+      // throw + ROLLBACK de TODA la cancelación, así que cancelOrderItem nunca funcionaba. La auditoría
+      // de la cancelación ya queda en `tempcancela` (foliocheque/cantidad/clave/razon/usuario/precio).
+
+      // 🔧 5b: recalcular totales del header tras quitar la línea. Antes NO se hacía (el comentario
+      // asumía erróneamente que el trigger lo hacía; el trigger solo escribe tracking) → el total
+      // quedaba inflado. ISNULL(...,0) deja la orden en 0 si era la última línea.
+      await new sql.Request(transaction).input('folio', sql.BigInt, folio).query(`
+        UPDATE tc SET
+          tc.totalarticulos = ISNULL(det.total_cantidad, 0),
+          tc.subtotal = ISNULL(det.total_precio_sin_imp, 0),
+          tc.totalimpuesto1 = ISNULL(det.total_impuestos, 0),
+          tc.total = ISNULL(det.total_final, 0),
+          tc.totalsindescuento = ISNULL(det.total_precio_sin_imp, 0)
+        FROM tempcheques tc
+        LEFT JOIN (
+          SELECT foliodet, SUM(cantidad) AS total_cantidad, SUM(preciosinimpuestos) AS total_precio_sin_imp,
+                 SUM(precio - preciosinimpuestos) AS total_impuestos, SUM(precio) AS total_final
+          FROM tempcheqdet WHERE foliodet = @folio GROUP BY foliodet
+        ) AS det ON tc.folio = det.foliodet
+        WHERE tc.folio = @folio;`)
 
       await transaction.commit()
-      log.info(`[Adapter SR11] Producto movimiento ${movementId} cancelado exitosamente.`)
-      // El Trigger del DELETE en tempcheqdet debería haber recalculado los totales en tempcheques.
+      log.info(`[Adapter SR11] Producto movimiento ${movementId} cancelado y totales recalculados.`)
     } catch (err: any) {
       log.error(`[Adapter SR11] Error en transacción de cancelar producto, haciendo ROLLBACK...`, err.message)
       await transaction.rollback()
@@ -290,65 +305,21 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     if (isNaN(shiftIdNum)) {
       throw new Error(`Invalid shift ID: ${shiftId}`)
     }
-    log.info(`[Adapter SR11] Iniciando proceso de cierre para el turno ${shiftIdNum}...`)
-    const pool = getDbPool()
-    const transaction = new sql.Transaction(pool)
-    try {
-      await transaction.begin()
-      log.info(`[Adapter SR11] Paso 1: Archivando datos del turno ${shiftIdNum}...`)
+    void data // ver nota abajo: el cierre no usa los declarados hasta implementar el archivado real
 
-      // --- PROCESO DE ARCHIVADO: Mover datos de tablas 'temp' a tablas permanentes ---
-      // Usamos el `idturno_cierre` para marcar a qué cierre pertenecen estos registros.
-
-      const archivalQueries = [
-        `INSERT INTO cheques (...) SELECT ..., @shiftId as idturno_cierre, ... FROM tempcheques WHERE idturno = @shiftId`,
-        `INSERT INTO cheqdet (...) SELECT ..., @shiftId as idturno_cierre, ... FROM tempcheqdet d JOIN tempcheques t ON d.foliodet = t.folio WHERE t.idturno = @shiftId`,
-        `INSERT INTO chequespagos (...) SELECT ..., @shiftId as idturno_cierre, ... FROM tempchequespagos p JOIN tempcheques t ON p.folio = t.folio WHERE t.idturno = @shiftId`,
-        // ... (añadir aquí los demás INSERT/SELECT para todas las tablas temp: tempcancela, etc.)
-      ]
-
-      for (const query of archivalQueries) {
-        await new sql.Request(transaction).input('shiftId', sql.Int, shiftIdNum).query(query)
-      }
-      log.info(`[Adapter SR11] Paso 2: Limpiando tablas temporales...`)
-
-      // --- PROCESO DE LIMPIEZA ---
-      const folioSubquery = `SELECT folio FROM tempcheques WHERE idturno = @shiftId`
-      await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftIdNum)
-        .query(`DELETE FROM mesasasignadas WHERE folio IN (${folioSubquery})`)
-      await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftIdNum)
-        .query(`DELETE FROM tempchequespagos WHERE folio IN (${folioSubquery})`)
-      await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftIdNum)
-        .query(`DELETE FROM tempcheqdet WHERE foliodet IN (${folioSubquery})`)
-      await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftIdNum)
-        .query(`DELETE FROM tempcancela WHERE foliocheque IN (${folioSubquery})`)
-      await new sql.Request(transaction).input('shiftId', sql.Int, shiftIdNum).query(`DELETE FROM tempcheques WHERE idturno = @shiftId`)
-
-      log.info(`[Adapter SR11] Paso 3: Cerrando el registro del turno...`)
-
-      // --- PROCESO DE CIERRE FINAL ---
-      await new sql.Request(transaction)
-        .input('shiftId', sql.Int, shiftIdNum)
-        .input('cierre', sql.DateTime, new Date())
-        .input('efectivo', sql.Money, data.cashDeclared)
-        .input('tarjeta', sql.Money, data.cardDeclared)
-        .input('vales', sql.Money, data.vouchersDeclared)
-        .input('otros', sql.Money, data.otherDeclared || 0)
-        .query('UPDATE turnos SET cierre=@cierre, efectivo=@efectivo, tarjeta=@tarjeta, vales=@vales WHERE idturno=@shiftId')
-
-      await new sql.Request(transaction).query("UPDATE folios SET ultimaorden=0, ultimofolioproduccion=0 WHERE serie=''")
-
-      await transaction.commit()
-      log.info(`[Adapter SR11] COMMIT exitoso. Turno ${shiftIdNum} cerrado y archivado.`)
-    } catch (err: any) {
-      log.error(`[Adapter SR11] Error en transacción de cerrar turno ${shiftIdNum}, haciendo ROLLBACK...`, err.message)
-      await transaction.rollback()
-      throw err
-    }
+    // 🔧 5b: Shift.CLOSE NO está soportado de forma segura por el bridge.
+    // El cierre nativo de SoftRestaurant archiva ~10 tablas temp*→permanente (cheques, cheqdet,
+    // chequespagos, cancela, foliosfacturados, bitacoratarjetacredito, numerostarjetas, cheqpedidos…),
+    // libera mesas, limpia PRODUCTOSENPRODUCCION y resetea folios — todo column-exact y version-específico.
+    // La implementación previa tenía listas de columnas placeholder ('...') → T-SQL inválido que SIEMPRE
+    // lanzaba; y de "completarse" mal habría BORRADO los temp* SIN archivar (pérdida de datos). Hasta
+    // tener un archivado completo validado en vivo, fallamos EXPLÍCITO (el comando va a la DLQ de
+    // comandos, queda visible para diagnóstico) en lugar de correr código destructivo/incompleto.
+    // El cierre de turno lo realiza el POS nativo, y el producer ya lo observa/suprime correctamente.
+    throw new Error(
+      `Shift.CLOSE no soportado por el bridge (turno ${shiftIdNum}): el cierre/archivado de turno lo hace el POS nativo. ` +
+        `Implementarlo en el bridge requiere replicar el archivado completo temp*→permanente, validado en vivo. Comando → DLQ.`,
+    )
   }
 
   // =================================================================
@@ -373,7 +344,8 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       log.info(`[Adapter SR11] Resolved folio ${folio} from external ID ${orderExternalId}`)
 
       // Call the new stored procedure
-      const result = await pool.request()
+      const result = await pool
+        .request()
         .input('Folio', sql.BigInt, folio)
         .input('PaymentAmount', sql.Money, payment.amount)
         .input('TipAmount', sql.Money, payment.tip || 0)
@@ -395,24 +367,23 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       log.info(`[Adapter SR11] ✅ ${message}`)
 
       // Determine if order is closed
-      const isClosed = remaining <= 0.01  // Allow for small rounding differences
+      const isClosed = remaining <= 0.01 // Allow for small rounding differences
 
       if (isClosed) {
         log.info(`[Adapter SR11] ✅ Order ${folio} fully paid`)
         return {
           closed: true,
           change: remaining < 0 ? Math.abs(remaining) : undefined,
-          totalPaid: payment.amount
+          totalPaid: payment.amount,
         }
       } else {
         log.info(`[Adapter SR11] 💰 Partial payment applied. Remaining: $${remaining}`)
         return {
           closed: false,
           remaining: remaining,
-          totalPaid: payment.amount
+          totalPaid: payment.amount,
         }
       }
-
     } catch (err: any) {
       log.error(`[Adapter SR11] Payment error:`, err.message)
       throw err
@@ -440,9 +411,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       const query = 'SELECT TOP 1 folio FROM tempcheques WHERE WorkspaceId = @workspaceId ORDER BY folio DESC'
       log.info(`[Adapter SR11] 🔍 Executing query: ${query}`)
 
-      const result = await pool.request()
-        .input('workspaceId', sql.UniqueIdentifier, orderExternalId)
-        .query(query)
+      const result = await pool.request().input('workspaceId', sql.UniqueIdentifier, orderExternalId).query(query)
 
       log.info(`[Adapter SR11] 🔍 Query returned ${result.recordset.length} results`)
       if (result.recordset.length > 0) {
@@ -480,7 +449,8 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     } else if (parts.length === 1) {
       // Formato v11: WorkspaceId
       const pool = await getDbPool()
-      const result = await pool.request()
+      const result = await pool
+        .request()
         .input('workspaceId', sql.UniqueIdentifier, orderExternalId)
         .query('SELECT folio FROM tempcheques WHERE WorkspaceId = @workspaceId')
 
@@ -493,7 +463,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * Obtiene los datos básicos de una orden
    */
-  private async getOrderData(folio: number, transaction: sql.Transaction): Promise<{ total: number, pagado: boolean } | null> {
+  private async getOrderData(folio: number, transaction: sql.Transaction): Promise<{ total: number; pagado: boolean } | null> {
     const result = await new sql.Request(transaction)
       .input('folio', sql.BigInt, folio)
       .query('SELECT total, pagado FROM tempcheques WHERE folio = @folio')
@@ -510,13 +480,14 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       .input('idformadepago', sql.VarChar, payment.posPaymentMethodId)
       .input('importe', sql.Money, payment.amount)
       .input('propina', sql.Money, payment.tip || 0)
-      .input('referencia', sql.VarChar, payment.reference || '')
-      .query(`
+      .input('referencia', sql.VarChar, payment.reference || '').query(`
         INSERT INTO tempchequespagos (folio, idformadepago, importe, propina, referencia)
         VALUES (@folio, @idformadepago, @importe, @propina, @referencia)
       `)
 
-    log.info(`[Adapter SR11] Pago insertado en tempchequespagos - Folio: ${folio}, Método: ${payment.posPaymentMethodId}, Monto: ${payment.amount}`)
+    log.info(
+      `[Adapter SR11] Pago insertado en tempchequespagos - Folio: ${folio}, Método: ${payment.posPaymentMethodId}, Monto: ${payment.amount}`,
+    )
   }
 
   /**
@@ -535,16 +506,12 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    */
   private async markOrderAsPaid(folio: number, transaction: sql.Transaction): Promise<void> {
     // Obtener el siguiente número de cheque
-    const folioResult = await new sql.Request(transaction)
-      .query("SELECT ultimofolio FROM folios WHERE serie=''")
+    const folioResult = await new sql.Request(transaction).query("SELECT ultimofolio FROM folios WHERE serie=''")
 
     const nextCheckNumber = folioResult.recordset[0].ultimofolio + 1
 
     // Marcar la orden como pagada e impresa con número de cheque
-    await new sql.Request(transaction)
-      .input('folio', sql.BigInt, folio)
-      .input('numcheque', sql.Int, nextCheckNumber)
-      .query(`
+    await new sql.Request(transaction).input('folio', sql.BigInt, folio).input('numcheque', sql.Int, nextCheckNumber).query(`
         UPDATE tempcheques
         SET pagado = 1,
             impreso = 1,
@@ -566,9 +533,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    */
   private async createSplitOrder(parentFolio: number, splitAmount: number, transaction: sql.Transaction): Promise<number> {
     // 1. Obtener datos de la orden padre
-    const parentOrder = await new sql.Request(transaction)
-      .input('folio', sql.BigInt, parentFolio)
-      .query(`
+    const parentOrder = await new sql.Request(transaction).input('folio', sql.BigInt, parentFolio).query(`
         SELECT mesa, idmesero, nopersonas, tipodeservicio, idarearestaurant,
                idempresa, estacion, idcomisionista, idcliente, idreservacion,
                total, fecha, usuarioapertura
@@ -583,9 +548,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     const parent = parentOrder.recordset[0]
 
     // 2. Generar sufijo para la mesa dividida (A, B, C...)
-    const existingSplits = await new sql.Request(transaction)
-      .input('baseMesa', sql.VarChar, parent.mesa + '-%')
-      .query(`
+    const existingSplits = await new sql.Request(transaction).input('baseMesa', sql.VarChar, parent.mesa + '-%').query(`
         SELECT COUNT(*) as count
         FROM tempcheques
         WHERE mesa LIKE @baseMesa AND pagado = 0
@@ -596,8 +559,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     const splitMesa = `${parent.mesa}-${splitSuffix}`
 
     // 3. Obtener siguiente número de orden
-    const ordenResult = await new sql.Request(transaction)
-      .query("SELECT ultimaorden FROM folios WHERE serie=''")
+    const ordenResult = await new sql.Request(transaction).query("SELECT ultimaorden FROM folios WHERE serie=''")
 
     const nextOrden = ordenResult.recordset[0].ultimaorden + 1
 
@@ -616,8 +578,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       .input('usuarioapertura', sql.VarChar, parent.usuarioapertura)
       .input('idcomisionista', sql.VarChar, parent.idcomisionista || '')
       .input('idcliente', sql.VarChar, parent.idcliente || '')
-      .input('idreservacion', sql.VarChar, parent.idreservacion || '')
-      .query(`
+      .input('idreservacion', sql.VarChar, parent.idreservacion || '').query(`
         INSERT INTO tempcheques (
           seriefolio, fecha, mesa, idmesero, nopersonas, tipodeservicio, orden,
           idarearestaurant, idempresa, estacion, total, descuento,
@@ -649,9 +610,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    */
   private async splitOrderItems(parentFolio: number, childFolio: number, splitRatio: number, transaction: sql.Transaction): Promise<void> {
     // 1. Obtener todos los items de la orden padre
-    const parentItems = await new sql.Request(transaction)
-      .input('folio', sql.BigInt, parentFolio)
-      .query(`
+    const parentItems = await new sql.Request(transaction).input('folio', sql.BigInt, parentFolio).query(`
         SELECT movimiento, comanda, cantidad, idproducto, descuento, precio, preciosinimpuestos,
                comentario, tiempo, mitad, hora, modificador, idestacion, impuesto1, impuesto2, impuesto3,
                usuariodescuento, comentariodescuento, idtipodescuento, idproductocompuesto,
@@ -702,8 +661,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('idcortesia', sql.VarChar, item.idcortesia)
         .input('numerotarjeta', sql.VarChar, item.numerotarjeta)
         .input('horaproduccion', sql.DateTime, item.horaproduccion)
-        .input('estadomonitor', sql.Int, item.estadomonitor)
-        .query(`
+        .input('estadomonitor', sql.Int, item.estadomonitor).query(`
           INSERT INTO tempcheqdet (
             foliodet, movimiento, comanda, cantidad, idproducto, descuento, precio, preciosinimpuestos,
             comentario, tiempo, mitad, hora, modificador, idestacion, impuesto1, impuesto2, impuesto3,
@@ -732,8 +690,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('cantidad', sql.Float, remainingQuantity)
         .input('precio', sql.Money, remainingPrice)
         .input('preciosinimpuestos', sql.Money, remainingPrecioSinImpuestos)
-        .input('preciocatalogo', sql.Money, item.preciocatalogo * (1 - splitRatio))
-        .query(`
+        .input('preciocatalogo', sql.Money, item.preciocatalogo * (1 - splitRatio)).query(`
           UPDATE tempcheqdet
           SET cantidad = @cantidad,
               precio = @precio,
@@ -751,9 +708,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    */
   private async adjustOrderItemQuantities(folio: number, remainingRatio: number, transaction: sql.Transaction): Promise<void> {
     // Obtener todos los items de la orden
-    const items = await new sql.Request(transaction)
-      .input('folio', sql.BigInt, folio)
-      .query(`
+    const items = await new sql.Request(transaction).input('folio', sql.BigInt, folio).query(`
         SELECT movimiento, cantidad, precio, preciosinimpuestos, preciocatalogo
         FROM tempcheqdet
         WHERE foliodet = @folio
@@ -772,8 +727,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('cantidad', sql.Float, newQuantity)
         .input('precio', sql.Money, newPrice)
         .input('preciosinimpuestos', sql.Money, newPrecioSinImpuestos)
-        .input('preciocatalogo', sql.Money, newPrecioCatalogo)
-        .query(`
+        .input('preciocatalogo', sql.Money, newPrecioCatalogo).query(`
           UPDATE tempcheqdet
           SET cantidad = @cantidad,
               precio = @precio,
@@ -790,11 +744,15 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    * ✅ NUEVO: Actualiza el total de una orden y todos los campos relacionados
    * Basado en la lógica del proyecto deprecado que funcionaba correctamente
    */
-  private async updateOrderTotal(folio: number, newTotal: number, paymentAmount: number, payment: IntelligentPaymentData, transaction: sql.Transaction): Promise<void> {
+  private async updateOrderTotal(
+    folio: number,
+    newTotal: number,
+    paymentAmount: number,
+    payment: IntelligentPaymentData,
+    transaction: sql.Transaction,
+  ): Promise<void> {
     // Obtener los valores originales de la orden para calcular la proporción de impuestos y observaciones actuales
-    const originalOrder = await new sql.Request(transaction)
-      .input('folio', sql.BigInt, folio)
-      .query(`
+    const originalOrder = await new sql.Request(transaction).input('folio', sql.BigInt, folio).query(`
         SELECT total, subtotal, totalimpuesto1, observaciones
         FROM tempcheques
         WHERE folio = @folio
@@ -824,7 +782,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
-      second: '2-digit'
+      second: '2-digit',
     })
 
     const paymentMethod = this.getPaymentMethodName(payment.posPaymentMethodId)
@@ -832,17 +790,14 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
 
     // Construir las observaciones actualizadas
     const currentObservations = original.observaciones || ''
-    const updatedObservations = currentObservations
-      ? `${currentObservations} | ${newPaymentNote}`
-      : newPaymentNote
+    const updatedObservations = currentObservations ? `${currentObservations} | ${newPaymentNote}` : newPaymentNote
 
     await new sql.Request(transaction)
       .input('folio', sql.BigInt, folio)
       .input('newTotal', sql.Money, newTotal)
       .input('newSubtotal', sql.Money, newSubtotal)
       .input('newTax', sql.Money, newTax)
-      .input('observaciones', sql.VarChar, updatedObservations)
-      .query(`
+      .input('observaciones', sql.VarChar, updatedObservations).query(`
         UPDATE tempcheques SET
           total = @newTotal,
           subtotal = @newSubtotal,
@@ -859,7 +814,9 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         WHERE folio = @folio
       `)
 
-    log.info(`[Adapter SR11] Total de orden actualizado completamente - Folio: ${folio}, Nuevo total: ${newTotal}, Subtotal: ${newSubtotal}, Impuesto: ${newTax}`)
+    log.info(
+      `[Adapter SR11] Total de orden actualizado completamente - Folio: ${folio}, Nuevo total: ${newTotal}, Subtotal: ${newSubtotal}, Impuesto: ${newTax}`,
+    )
     log.info(`[Adapter SR11] Observaciones actualizadas: ${updatedObservations}`)
   }
 
@@ -867,13 +824,17 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    * ✅ NUEVO: Registra un pago parcial para auditoría y reconciliación
    * Solo actualiza observaciones SIN modificar totales de la orden
    */
-  private async trackPartialPayment(folio: number, amount: number, payment: IntelligentPaymentData, transaction: sql.Transaction): Promise<void> {
+  private async trackPartialPayment(
+    folio: number,
+    amount: number,
+    payment: IntelligentPaymentData,
+    transaction: sql.Transaction,
+  ): Promise<void> {
     // 1. Agregar pago a observaciones
     await this.addPaymentToObservations(folio, amount, payment, transaction)
 
     // 2. Verificar si existe la tabla de tracking de pagos parciales y registrar para auditoría
-    const tableExists = await new sql.Request(transaction)
-      .query(`
+    const tableExists = await new sql.Request(transaction).query(`
         SELECT COUNT(*) as count
         FROM INFORMATION_SCHEMA.TABLES
         WHERE TABLE_NAME = 'AvoqadoPartialPayments'
@@ -886,8 +847,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('amount', sql.Money, amount)
         .input('tip', sql.Money, payment.tip || 0)
         .input('paymentMethodId', sql.VarChar, payment.posPaymentMethodId)
-        .input('reference', sql.VarChar, payment.reference || '')
-        .query(`
+        .input('reference', sql.VarChar, payment.reference || '').query(`
           INSERT INTO AvoqadoPartialPayments (
             Folio, Amount, TipAmount, PaymentMethodId, Reference, IsProcessed
           ) VALUES (
@@ -904,11 +864,14 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * ✅ NUEVO: Agrega información de pago a las observaciones SIN modificar totales
    */
-  private async addPaymentToObservations(folio: number, paymentAmount: number, payment: IntelligentPaymentData, transaction: sql.Transaction): Promise<void> {
+  private async addPaymentToObservations(
+    folio: number,
+    paymentAmount: number,
+    payment: IntelligentPaymentData,
+    transaction: sql.Transaction,
+  ): Promise<void> {
     // Obtener observaciones actuales
-    const currentOrder = await new sql.Request(transaction)
-      .input('folio', sql.BigInt, folio)
-      .query(`
+    const currentOrder = await new sql.Request(transaction).input('folio', sql.BigInt, folio).query(`
         SELECT observaciones
         FROM tempcheques
         WHERE folio = @folio
@@ -928,7 +891,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
-      second: '2-digit'
+      second: '2-digit',
     })
 
     const paymentMethod = this.getPaymentMethodName(payment.posPaymentMethodId)
@@ -936,15 +899,10 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
 
     // Construir las observaciones actualizadas
     const currentObservations = current.observaciones || ''
-    const updatedObservations = currentObservations
-      ? `${currentObservations} | ${newPaymentNote}`
-      : newPaymentNote
+    const updatedObservations = currentObservations ? `${currentObservations} | ${newPaymentNote}` : newPaymentNote
 
     // Solo actualizar observaciones
-    await new sql.Request(transaction)
-      .input('folio', sql.BigInt, folio)
-      .input('observaciones', sql.VarChar, updatedObservations)
-      .query(`
+    await new sql.Request(transaction).input('folio', sql.BigInt, folio).input('observaciones', sql.VarChar, updatedObservations).query(`
         UPDATE tempcheques
         SET observaciones = @observaciones
         WHERE folio = @folio
@@ -958,16 +916,16 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    */
   private getPaymentMethodName(paymentMethodId: string): string {
     const paymentMethods: { [key: string]: string } = {
-      'EF': 'Efectivo',
-      'CASH': 'Efectivo',
-      'ACASH': 'Efectivo Avoqado',
-      'CRE': 'Tarjeta de Crédito',
-      'DEB': 'Tarjeta de Débito',
-      'CARD': 'Tarjeta',
-      'ACARD': 'Tarjeta Avoqado',
-      'TRANS': 'Transferencia',
-      'VALE': 'Vale de Consumo',
-      'OTRO': 'Otro'
+      EF: 'Efectivo',
+      CASH: 'Efectivo',
+      ACASH: 'Efectivo Avoqado',
+      CRE: 'Tarjeta de Crédito',
+      DEB: 'Tarjeta de Débito',
+      CARD: 'Tarjeta',
+      ACARD: 'Tarjeta Avoqado',
+      TRANS: 'Transferencia',
+      VALE: 'Vale de Consumo',
+      OTRO: 'Otro',
     }
 
     return paymentMethods[paymentMethodId] || paymentMethodId
@@ -982,7 +940,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       posPaymentMethodId: 'OTRO',
       amount: 0,
       tip: 0,
-      reference: 'Split order adjustment'
+      reference: 'Split order adjustment',
     }
     await this.updateOrderTotal(parentFolio, newTotal, 0, tempPayment, transaction)
   }
@@ -1033,8 +991,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('idestacion', sql.VarChar, idEstacion)
         .input('orden', sql.Numeric, nextOrden)
         .input('total', sql.Money, data.amount)
-        .input('observaciones', sql.VarChar, data.notes || `Pago rápido: ${data.reference || ''}`)
-        .query(`
+        .input('observaciones', sql.VarChar, data.notes || `Pago rápido: ${data.reference || ''}`).query(`
           INSERT INTO tempcheques (
             seriefolio, numcheque, fecha, mesa, nopersonas, idmesero,
             pagado, cancelado, impreso, impresiones, cambio, descuento, orden,
@@ -1076,8 +1033,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('idproducto', sql.VarChar, productId)
         .input('precio', sql.Money, data.amount)
         .input('preciosinimpuestos', sql.Money, data.amount)
-        .input('idestacion', sql.VarChar, idEstacion)
-        .query(`
+        .input('idestacion', sql.VarChar, idEstacion).query(`
           INSERT INTO tempcheqdet (
             foliodet, movimiento, comanda, cantidad, idproducto,
             descuento, precio, preciosinimpuestos, tiempo, hora,
@@ -1098,10 +1054,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
 
       const numCheque = numChequeResult.recordset[0].nextNumCheque
 
-      await new sql.Request(transaction)
-        .input('folio', sql.BigInt, newFolio)
-        .input('numcheque', sql.Numeric, numCheque)
-        .query(`
+      await new sql.Request(transaction).input('folio', sql.BigInt, newFolio).input('numcheque', sql.Numeric, numCheque).query(`
           UPDATE tempcheques
           SET impreso = 1, numcheque = @numcheque, impresiones = 1
           WHERE folio = @folio
@@ -1112,16 +1065,19 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       const paymentMethod = data.posPaymentMethodId
 
       // Determinar los campos de pago según el método
-      let efectivo = 0, tarjeta = 0, vales = 0, otros = 0
+      let efectivo = 0,
+        tarjeta = 0,
+        vales = 0,
+        otros = 0
       switch (paymentMethod.toUpperCase()) {
-        case 'AEF':  // Efectivo en el sistema
+        case 'AEF': // Efectivo en el sistema
         case 'EF':
         case 'CASH':
         case 'ACASH':
           efectivo = paymentAmount
           break
-        case 'CRE':  // Tarjeta de crédito
-        case 'DEB':  // Tarjeta de débito
+        case 'CRE': // Tarjeta de crédito
+        case 'DEB': // Tarjeta de débito
         case 'CARD':
         case 'ACARD':
         case 'SRPC':
@@ -1140,8 +1096,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('folio', sql.BigInt, newFolio)
         .input('idformadepago', sql.VarChar, paymentMethod)
         .input('importe', sql.Money, paymentAmount)
-        .input('referencia', sql.VarChar, data.reference || '')
-        .query(`
+        .input('referencia', sql.VarChar, data.reference || '').query(`
           INSERT INTO tempchequespagos (
             folio, idformadepago, importe, propina, referencia
           ) VALUES (
@@ -1156,8 +1111,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         .input('tarjeta', sql.Money, tarjeta)
         .input('vales', sql.Money, vales)
         .input('otros', sql.Money, otros)
-        .input('usuariopago', sql.VarChar, data.cashierPosId)
-        .query(`
+        .input('usuariopago', sql.VarChar, data.cashierPosId).query(`
           UPDATE tempcheques
           SET pagado = 1,
               efectivo = @efectivo,
@@ -1179,14 +1133,12 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
         transactionTime: new Date(),
         totalAmount: data.amount,
         paymentMethod: this.getPaymentMethodName(paymentMethod),
-        success: true
+        success: true,
       }
-
     } catch (error: any) {
       await transaction.rollback()
       log.error(`[Adapter SR11] Error al crear pago rápido: ${error.message}`)
       throw error
     }
   }
-
 }

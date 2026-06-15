@@ -40,8 +40,9 @@
 ## Database Contracts
 - Target system is Microsoft SQL Server 2014 Express 32-bit; keep all queries/stored procedures compatible with this version.
 - Core tables: `tempcheques` (active orders), `tempcheqdet` (line items), `tempchequespagos` (payments), `turnos` (shifts), archived counterparts (`cheques`, `cheqdet`, `chequespagos`).
+- `AvoqadoProcessedCommands` is the command-idempotency store: the Commander records each handled Avoqado → POS command (deduped by `CommandKey` = `messageId`/`commandId`/`idempotencyKey`) and skips/acks a redelivered command whose key already exists (fail-open if the table is unavailable).
 - Stored procedures: `sp_GetPendingChanges` (`ORDER BY Timestamp, Id` — desempate estable), `sp_MarkChangesProcessed`, and POS operations invoked by adapters must remain idempotent and performant.
-- `sp_CleanupOldTrackingRecords` (`@DaysToKeep INT = 7`) prunes old processed/error/failed `AvoqadoTracking` rows (también poda AvoqadoDebugLog, que antes crecía sin límite).
+- `sp_CleanupOldTrackingRecords` (`@DaysToKeep INT = 7`) prunes old processed/error/failed `AvoqadoTracking` rows (también poda AvoqadoDebugLog, que antes crecía sin límite, y AvoqadoProcessedCommands).
 - `sp_ApplyPartialPayment` handles partial payment processing and validation. Fixed C-1 (remaining computed from the running balance, not re-derived from the mutated total → no balance drift/under-collection) and made idempotent by `@Reference` (redelivered Payment.APPLY no longer double-applies).
 - Entity IDs: v10 uses `{InstanceId}:{IdTurno}:{Folio}`; v11 uses `WorkspaceId` (plus `:Movimiento` for items). Always treat `turnos.idturno` as the business key, not `idturnointerno`.
 - Shift closure detection relies on `turnos.cierre` updates (see `CLAUDE.md` and `scripts/sql/shift-close-flow` notes). Deletions during archival should not be treated as cancellations.
@@ -49,7 +50,7 @@
 ## Messaging Topology
 - Exchanges: `pos_events_exchange` and `pos_commands_exchange`; dead-letter exchange `dead_letter_exchange` with queue `avoqado_events_dead_letter_queue`.
 - Producer routing keys: `pos.softrestaurant.order.{created|updated|deleted}`, `pos.softrestaurant.orderitem.{created|updated|deleted}`, `pos.softrestaurant.shift.{created|updated|closed}`, `pos.softrestaurant.system.heartbeat`.
-- Commander queue: `commands_queue.venue_{venueId}` bound to `command.softrestaurant.{venueId}`.
+- Commander queue: `commands_queue.venue_{venueId}` bound to `command.softrestaurant.{venueId}`; it has a dead-letter queue (`avoqado_commands_dead_letter_queue`) so failed/unknown/invalid-JSON commands are preserved instead of silently dropped.
 - Configuration error queue: `config_errors_{posType}_{instanceId}` bound to `command.{posType}.configuration.error`.
 
 ## Configuration and Secrets

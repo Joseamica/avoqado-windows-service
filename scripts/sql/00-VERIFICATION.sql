@@ -96,6 +96,19 @@ END
 ELSE
     PRINT '  ❌ AvoqadoShiftArchiving - MISSING'
 
+IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NOT NULL
+BEGIN
+    PRINT '  ✅ AvoqadoProcessedCommands'
+
+    -- Check structure
+    IF COL_LENGTH('AvoqadoProcessedCommands', 'CommandKey') IS NOT NULL
+        PRINT '      ✅ Has CommandKey column'
+    ELSE
+        PRINT '      ❌ Missing CommandKey column'
+END
+ELSE
+    PRINT '  ❌ AvoqadoProcessedCommands - MISSING'
+
 PRINT ''
 PRINT '📦 STORED PROCEDURES:'
 IF OBJECT_ID('sp_GetPendingChanges', 'P') IS NOT NULL
@@ -235,6 +248,16 @@ BEGIN
     PRINT '   Total: ' + CAST(@TotalRecords AS VARCHAR)
     PRINT '   Pending: ' + CAST(@Pending AS VARCHAR)
     PRINT '   Processed: ' + CAST(@Processed AS VARCHAR)
+END
+
+IF OBJECT_ID('AvoqadoProcessedCommands', 'U') IS NOT NULL
+BEGIN
+    DECLARE @ProcessedCommands INT
+    SELECT @ProcessedCommands = COUNT(*) FROM AvoqadoProcessedCommands
+
+    PRINT ''
+    PRINT '📊 Processed Commands (idempotency store):'
+    PRINT '   Total: ' + CAST(@ProcessedCommands AS VARCHAR)
 END
 
 PRINT ''
