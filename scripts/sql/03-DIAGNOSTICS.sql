@@ -403,6 +403,63 @@ PRINT '💡 After the H-1 fix, DELETE rows carry the LINE''s WorkspaceId. A sudd
 PRINT '   spike here can flag mis-firing item removals or cancellation churn.'
 PRINT ''
 
+-- Stuck / dropped tracking rows (silent event loss watch)
+SET QUOTED_IDENTIFIER ON;
+
+PRINT '⚠️ STUCK / DROPPED TRACKING ROWS (RetryCount >= 5, never delivered)'
+PRINT '--------------------------------------------------------------------'
+PRINT 'sp_GetPendingChanges filters RetryCount < 5, so these rows are SILENTLY'
+PRINT 'EXCLUDED from sync — never delivered AND never retried (silent event loss).'
+PRINT 'This is the alert the system was missing; investigate ErrorMsg and re-drive'
+PRINT 'or clear them (sp_CleanupOldTrackingRecords prunes them after @DaysToKeep).'
+PRINT ''
+
+DECLARE @StuckDropped INT
+SELECT @StuckDropped = COUNT(*)
+FROM AvoqadoTracking
+WHERE ProcessedAt IS NULL
+  AND RetryCount >= 5
+
+PRINT 'Stuck/dropped rows (ProcessedAt IS NULL AND RetryCount >= 5): ' + CAST(@StuckDropped AS VARCHAR)
+PRINT ''
+
+SELECT TOP 20
+    Id,
+    EntityType,
+    LEFT(EntityId, 50) as EntityId,
+    Operation,
+    RetryCount,
+    Timestamp,
+    LEFT(ISNULL(ErrorMsg, ''), 200) as ErrorMsg
+FROM AvoqadoTracking
+WHERE ProcessedAt IS NULL
+  AND RetryCount >= 5
+ORDER BY Timestamp ASC, Id ASC
+
+IF @StuckDropped = 0
+    PRINT '✅ none'
+
+PRINT ''
+
+-- AvoqadoDebugLog size (growth watch)
+PRINT '📒 AvoqadoDebugLog SIZE (growth watch)'
+PRINT '--------------------------------------------------------------------'
+PRINT 'sp_CleanupOldTrackingRecords now prunes AvoqadoDebugLog (Timestamp < cutoff);'
+PRINT 'previously it grew unbounded. A large/old set here means cleanup is overdue.'
+PRINT ''
+
+DECLARE @DebugLogRows INT, @DebugLogOldest DATETIME
+SELECT @DebugLogRows = COUNT(*) FROM AvoqadoDebugLog
+SELECT @DebugLogOldest = MIN(Timestamp) FROM AvoqadoDebugLog
+
+PRINT 'AvoqadoDebugLog total rows: ' + CAST(@DebugLogRows AS VARCHAR)
+PRINT 'AvoqadoDebugLog oldest Timestamp: ' + ISNULL(CONVERT(VARCHAR(30), @DebugLogOldest, 121), '(empty)')
+
+IF @DebugLogRows = 0
+    PRINT '✅ none'
+
+PRINT ''
+
 PRINT '======================================================================'
 PRINT ' DIAGNOSTICS COMPLETE'
 PRINT '======================================================================'

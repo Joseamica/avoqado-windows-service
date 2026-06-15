@@ -435,7 +435,7 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 - En v10, el entity-id de orden cambia al transicionar idturno 0→real → rompe coalescing del debounce y crea dos claves para una orden lógica. [MEDIUM, entity-id]
 
 **Pago / parciales**
-- `sp_GetPendingChanges` ordena `ORDER BY Timestamp ASC` **sin desempate por Id** → empates al milisegundo reordenan/starvan; filas con `RetryCount>=5` se excluyen para siempre sin alerta. [MEDIUM, ordering-timing]
+- **✅ ARREGLADO (2026-06-15):** `sp_GetPendingChanges` ahora ordena `ORDER BY Timestamp ASC, Id ASC` (desempate estable por Id) → ya no hay reordenamiento/starvación de filas con el mismo milisegundo. (La exclusión silenciosa de filas `RetryCount>=5` se aborda con el nuevo diagnóstico de filas atascadas en `03-DIAGNOSTICS` — ver abajo.) `sp_GetPendingChanges` ordena `ORDER BY Timestamp ASC` **sin desempate por Id** → empates al milisegundo reordenan/starvan; filas con `RetryCount>=5` se excluyen para siempre sin alerta. [MEDIUM, ordering-timing]
 - Rama full no escribe buckets `efectivo/tarjeta/vales/otros/propina/cambio` → descuadre de corte. [MEDIUM, data-fidelity]
 - `cambio` se calcula pero no se persiste; en full el adapter reporta change undefined. [MEDIUM, data-fidelity]
 - `Trg_Avoqado_Payments` usa entity-id de pago **por folio** (`TOP 1 WorkspaceId ORDER BY DESC`) → múltiples tenders colapsan a un id; DELETE puede resolver a otro pago. [MEDIUM, entity-id]
@@ -458,11 +458,11 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 
 **Transversales / completitud**
 - **Catálogos** (productos, formasdepago, meseros, areasrestaurant, mesas, clientes) **nunca se sincronizan** POS→plataforma (sin trigger ni evento). El MCP expone set_menu_item_price/create_product etc. asumiendo un modelo autoritativo que el bridge no mantiene. [MEDIUM, trigger-coverage]
-- Errores de trigger se marcan `RetryCount=99`/`Operation='ERROR'` y `sp_GetPendingChanges` los excluye (`RetryCount<5`) → **pérdida silenciosa** de un cambio sin alerta. [MEDIUM, data-fidelity]
-- `folio` se bindea como `sql.Int` en varios lookups del producer mientras `tempcheques.folio` es BIGINT → overflow potencial en venues de alto volumen/split. [LOW, data-fidelity]
+- **✅ ARREGLADO (2026-06-15):** diagnóstico de filas atascadas agregado a `03-DIAGNOSTICS` — alerta en vez de pérdida silenciosa. La sección "⚠️ STUCK / DROPPED TRACKING ROWS" cuenta y lista (TOP 20) las filas `ProcessedAt IS NULL AND RetryCount >= 5` (incluye los `RetryCount=99`/`Operation='ERROR'`), que `sp_GetPendingChanges` excluye para siempre, con su `ErrorMsg`. Sigue siendo deseable re-drenarlas/limpiarlas, pero ya NO pasan inadvertidas. Errores de trigger se marcan `RetryCount=99`/`Operation='ERROR'` y `sp_GetPendingChanges` los excluye (`RetryCount<5`) → **pérdida silenciosa** de un cambio sin alerta. [MEDIUM, data-fidelity]
+- **✅ ARREGLADO (2026-06-15):** `folio` ahora se bindea como `sql.BigInt` en los lookups del producer (era `sql.Int`), eliminando el riesgo de overflow al leer `tempcheques.folio` (BIGINT) en venues de alto volumen/split. (Pendiente: el adapter `SoftRestaurant11Adapter.ts` aún bindea `folio` como `sql.Int` en ~10 puntos de la ruta de comandos — ver Diferido abajo.) `folio` se bindea como `sql.Int` en varios lookups del producer mientras `tempcheques.folio` es BIGINT → overflow potencial en venues de alto volumen/split. [LOW, data-fidelity]
 - Riesgo de deadlock/agotamiento de pool entre el poll de 2s (N×5 round-trips por cambio) y las tx de escritura del POS en SQL Express 32-bit; sin timeout/retry de deadlock visible. [MEDIUM, ordering-timing]
 - Código muerto: `createSplitOrder/splitOrderItems/adjustOrderItemQuantities/updateParentOrderTotal/insertPaymentToPOS/markOrderAsPaid/trackPartialPayment` y tabla `AvoqadoPartialPayments` (no escrita en runtime). Docs referencian funciones inexistentes (`fn_CanCompleteOrderPayment`, `sp_AddPartialPayment`, `analysis/db/`). [LOW, other]
-- `AvoqadoDebugLog` crece sin poda (`sp_CleanupOldTrackingRecords` solo toca `AvoqadoTracking`). [LOW, other]
+- **✅ ARREGLADO (2026-06-15):** `sp_CleanupOldTrackingRecords` ahora también poda `AvoqadoDebugLog` (`Timestamp < cutoff`), que antes crecía sin límite; además `03-DIAGNOSTICS` muestra el conteo y el Timestamp más antiguo de `AvoqadoDebugLog` como vigilancia de crecimiento. `AvoqadoDebugLog` crece sin poda (`sp_CleanupOldTrackingRecords` solo toca `AvoqadoTracking`). [LOW, other]
 
 ---
 
@@ -580,6 +580,16 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 6. **Limpieza**: añadir `ORDER BY Timestamp ASC, Id ASC` a `sp_GetPendingChanges`; alertar filas `RetryCount=99`/error; bindear `folio` como BigInt; eliminar/cuarentenar código muerto y `Shift.CLOSE` no funcional (H-18); podar `AvoqadoDebugLog`.
 
 > Cada cambio que toque esquema/SP/trigger debe replicarse en los 5 scripts SQL (`01-COMPLETE-INSTALL`, `00-CLEANUP-ALL`, `00-VERIFICATION`, `02-TESTING`, `03-DIAGNOSTICS`) y en la documentación (CLAUDE.md / AGENTS.md / master docs), por las reglas del repo.
+
+### Diferido (Fase 4+)
+
+Items conscientemente pospuestos tras la limpieza de Fase 4 (no son regresiones; se difieren por costo/alcance o por requerir captura en vivo):
+
+- **(i) `folio` como `sql.Int` en el adapter** — `SoftRestaurant11Adapter.ts` aún bindea `folio` como `sql.Int` en ~10 puntos (misma clase de overflow LOW que ya se arregló en el producer, pero en la **ruta de comandos**). Replicar el cambio a `sql.BigInt` allí.
+- **(ii) Eliminación de código muerto** — `createSplitOrder`/`splitOrderItems`/`adjustOrderItemQuantities`/`updateParentOrderTotal`/`insertPaymentToPOS`/`markOrderAsPaid`/`trackPartialPayment` y la tabla `AvoqadoPartialPayments` (no escrita en runtime). Borrar y limpiar referencias en docs.
+- **(iii) Movimientos de caja (H-11)** — retiros/depósitos siguen sin sincronizar; requiere un nuevo trigger (`Trg_Avoqado_CashMovement`) + captura en vivo del nombre real de la tabla y columnas antes de implementarlo.
+- **(iv) Optimización del guard de cierre a nivel trigger** — el check `wasArchived` en el producer ya hace correcta la supresión de DELETEs de cierre; esto es solo para **reducir el volumen de filas de tracking** en cierres grandes (no es correctitud).
+- **(v) Rediseño "dejar de encoger el total de la orden en pago parcial"** — abarca bridge + backend + display del POS; entrelazado con la población del bucket de corte de caja H-6 (`efectivo/tarjeta/propina` en el header), que depende de este rediseño. Ambos diferidos juntos.
 
 ---
 

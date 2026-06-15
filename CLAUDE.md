@@ -561,7 +561,7 @@ The service integrates with existing POS tables through trigger-based change tra
 
 **Sync Operations:**
 
-- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (reads `WHERE ProcessedAt IS NULL`, batched, max 100)
+- **`sp_GetPendingChanges`** - Retrieves pending changes since last sync (reads `WHERE ProcessedAt IS NULL`, batched, max 100) (`ORDER BY Timestamp, Id` — desempate estable)
 - **`sp_MarkChangesProcessed`** - Marks changes as processed (sets `ProcessedAt`) after successful sync
 
 **Payment Operations:**
@@ -578,10 +578,11 @@ The service integrates with existing POS tables through trigger-based change tra
 
 **Maintenance (v2.5.0):**
 
-- **`sp_CleanupOldTrackingRecords`** ✅ - Automated cleanup of old processed/error records (`@DaysToKeep INT = 7`)
+- **`sp_CleanupOldTrackingRecords`** ✅ - Automated cleanup of old processed/error records (`@DaysToKeep INT = 7`) (también poda AvoqadoDebugLog)
   - Deletes processed records older than @DaysToKeep days (default: 7)
   - Deletes trigger errors (RetryCount=99) older than @DaysToKeep days
   - Deletes failed records (RetryCount>=5) older than @DaysToKeep days
+  - Also prunes AvoqadoDebugLog rows older than @DaysToKeep days (it grew unbounded before)
 
 #### Database Triggers (SQL Server 2014 Compatible)
 

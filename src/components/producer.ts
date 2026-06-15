@@ -509,12 +509,12 @@ async function processOrderChangeV10(change: ChangeNotification, venueId: string
     if (idturno && idturno !== 'null' && isValidIdTurno) {
       log.info(`[Order Processor] Buscando orden con idturno ${numericIdTurno} y folio ${folio}`)
       request.input('idturno', sql.BigInt, numericIdTurno)
-      request.input('folio', sql.Int, folio)
+      request.input('folio', sql.BigInt, folio)
       query = 'SELECT * FROM tempcheques WHERE idturno = @idturno AND folio = @folio'
     } else {
       // Si idturno es nulo o una cadena vacía, buscamos la orden sin turno asignado.
       log.info(`[Order Processor] Buscando orden con idturno NULO y folio ${folio}`)
-      request.input('folio', sql.Int, folio)
+      request.input('folio', sql.BigInt, folio)
       query = 'SELECT * FROM tempcheques WHERE idturno IS NULL AND folio = @folio'
     }
 
@@ -555,7 +555,7 @@ async function processOrderChangeV10(change: ChangeNotification, venueId: string
     {
       const paymentsRes = await pool
         .request()
-        .input('folio', sql.Int, folio)
+        .input('folio', sql.BigInt, folio)
         .query('SELECT idformadepago, importe, propina, referencia FROM tempchequespagos WHERE folio = @folio')
 
       if (paymentsRes.recordset.length > 0) {
@@ -673,7 +673,7 @@ async function processOrderChangeV11(
     {
       const paymentsRes = await pool
         .request()
-        .input('folio', sql.Int, posData.folio)
+        .input('folio', sql.BigInt, posData.folio)
         .query('SELECT idformadepago, importe, propina, referencia FROM tempchequespagos WHERE folio = @folio')
 
       if (paymentsRes.recordset.length > 0) {

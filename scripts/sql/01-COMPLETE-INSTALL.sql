@@ -355,7 +355,10 @@ AS BEGIN
     SELECT TOP (@MaxResults) Id, EntityType, EntityId, Operation, Timestamp, RetryCount
     FROM AvoqadoTracking
     WHERE ProcessedAt IS NULL AND RetryCount < 5
-    ORDER BY Timestamp ASC
+    -- Tie-break by Id (IDENTITY, monotonic): without it, rows sharing the same millisecond Timestamp
+    -- can reorder between polls — under load that risks an early row never reaching the TOP(@MaxResults)
+    -- window (starvation). Id ASC makes the ordering stable and insertion-monotonic.
+    ORDER BY Timestamp ASC, Id ASC
 END
 GO
 PRINT '  ✅ Created sp_GetPendingChanges'
@@ -633,6 +636,15 @@ AS BEGIN
 
     SET @DeletedCount = @@ROWCOUNT
     PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old failed records'
+
+    -- Prune AvoqadoDebugLog: sp_ApplyPartialPayment writes ~10 rows per call and nothing pruned it
+    -- before (it grew unbounded). Same retention window.
+    IF OBJECT_ID('AvoqadoDebugLog', 'U') IS NOT NULL
+    BEGIN
+        DELETE FROM AvoqadoDebugLog WHERE Timestamp < @CutoffDate
+        SET @DeletedCount = @@ROWCOUNT
+        PRINT 'Deleted ' + CAST(@DeletedCount AS VARCHAR) + ' old AvoqadoDebugLog rows'
+    END
 END
 GO
 PRINT '  ✅ Created sp_CleanupOldTrackingRecords'
