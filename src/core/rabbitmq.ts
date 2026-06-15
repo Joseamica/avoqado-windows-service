@@ -35,8 +35,13 @@ export const onReconnect = (handler: ReconnectHandler): void => {
 export const POS_EVENTS_EXCHANGE = 'pos_events_exchange'
 export const POS_COMMANDS_EXCHANGE = 'pos_commands_exchange'
 export const AVOQADO_EVENTS_QUEUE = 'avoqado_events_queue'
-const DEAD_LETTER_EXCHANGE = 'dead_letter_exchange'
+export const DEAD_LETTER_EXCHANGE = 'dead_letter_exchange'
 const AVOQADO_EVENTS_DLQ = 'avoqado_events_dead_letter_queue'
+// DLQ de COMANDOS (Avoqado->POS) sobre el mismo DLX: un comando que falla, es
+// desconocido o trae JSON inválido se PRESERVA aquí en vez de descartarse en
+// silencio (antes la cola de comandos no tenía DLX → nack(requeue=false) = pérdida).
+export const AVOQADO_COMMANDS_DLQ = 'avoqado_commands_dead_letter_queue'
+export const COMMANDS_DLQ_ROUTING_KEY = 'dead-letter-command'
 
 export const publishMessage = async (exchange: string, routingKey: string, payload: object): Promise<void> => {
   const channel = getRabbitMQChannel()
@@ -63,6 +68,9 @@ const assertTopology = async (ch: ConfirmChannel): Promise<void> => {
   await ch.assertExchange(DEAD_LETTER_EXCHANGE, 'direct', { durable: true })
   await ch.assertQueue(AVOQADO_EVENTS_DLQ, { durable: true })
   await ch.bindQueue(AVOQADO_EVENTS_DLQ, DEAD_LETTER_EXCHANGE, 'dead-letter')
+  // DLQ de comandos (Avoqado->POS): comandos fallidos/desconocidos aterrizan aquí.
+  await ch.assertQueue(AVOQADO_COMMANDS_DLQ, { durable: true })
+  await ch.bindQueue(AVOQADO_COMMANDS_DLQ, DEAD_LETTER_EXCHANGE, COMMANDS_DLQ_ROUTING_KEY)
   await ch.assertExchange(POS_EVENTS_EXCHANGE, 'topic', { durable: true })
   await ch.assertExchange(POS_COMMANDS_EXCHANGE, 'topic', { durable: true })
   await ch.assertQueue(AVOQADO_EVENTS_QUEUE, {
@@ -169,6 +177,14 @@ export const getRabbitMQChannel = (): amqp.ConfirmChannel => {
     throw new Error('El canal de RabbitMQ no ha sido inicializado.')
   }
   return channel
+}
+
+/** El ChannelModel de la conexión actual — para abrir canales temporales (p. ej. migrar una cola). */
+export const getChannelModel = (): ChannelModel => {
+  if (!channelModel) {
+    throw new Error('La conexión de RabbitMQ no ha sido inicializada.')
+  }
+  return channelModel
 }
 
 export const closeRabbitMQConnection = async (): Promise<void> => {
