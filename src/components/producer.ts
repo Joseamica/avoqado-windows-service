@@ -62,6 +62,16 @@ async function sendHeartbeat() {
       return
     }
 
+    // RabbitMQ aún conectando (el connect es no-bloqueante por diseño): esto NO es
+    // un fallo del producer. Omitimos este latido SIN marcar isProducerHealthy=false,
+    // para no pausar el polling ~60s (hasta el siguiente heartbeat) en cada arranque.
+    // El guard de RabbitMQ en pollForChanges() ya difiere el polling de forma suave
+    // hasta que el canal sube, y el próximo heartbeat (o el de los 60s) se enviará solo.
+    if (!isRabbitConnected()) {
+      log.warn('[Heartbeat] ⏳ Heartbeat omitido - RabbitMQ aún no conectado (se reintentará).')
+      return
+    }
+
     const pool = getDbPool()
     const { venueId, posType } = loadConfig()
     const result = await pool.request().query('SELECT TOP 1 InstanceId FROM dbo.AvoqadoInstanceInfo')
@@ -94,6 +104,63 @@ async function markProcessed(ids: Array<number | string>): Promise<void> {
   if (ids.length === 0) return
   const pool = getDbPool()
   await pool.request().input('Ids', sql.VarChar(sql.MAX), ids.join(',')).execute('sp_MarkChangesProcessed')
+}
+
+const GUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+/**
+ * 🔧 SHIFT-CLOSE SUPPRESSION (H-4/H-13/H-17): returns true if a DELETEd temp* entity was ARCHIVED
+ * to its permanent counterpart (cheques/cheqdet/chequespagos) — i.e. the DELETE is part of a shift
+ * close, NOT a real cancellation. Version-agnostic (v11 WorkspaceId, v10 idturno:folio) and
+ * timing-robust: the shift-close archives (INSERT into the permanent table) BEFORE deleting from
+ * temp*, so by the time we process the delete-tracking row the archived row already exists. This
+ * replaces the old closedShiftIdsInBatch heuristic (v10-only and broken: it matched
+ * Operation.includes('UPDATE') but the trigger emits 'CLOSED', so the set was always empty).
+ * On a malformed EntityId it returns false (publish, don't risk swallowing a real cancellation);
+ * DB errors propagate so the per-change handler leaves the row unprocessed and retries next poll.
+ */
+async function wasArchived(pool: sql.ConnectionPool, entityType: string, entityId: string): Promise<boolean> {
+  const table =
+    entityType === 'order' ? 'cheques' : entityType === 'orderitem' ? 'cheqdet' : entityType === 'payment' ? 'chequespagos' : null
+  if (!table) return false
+
+  if (usesWorkspaceId) {
+    // v11/v12: EntityId is the entity's own WorkspaceId (items may be "WorkspaceId:movimiento").
+    const wid = entityId.split(':')[0]
+    if (!GUID_RE.test(wid)) return false
+    const res = await pool
+      .request()
+      .input('wid', sql.UniqueIdentifier, wid)
+      .query(`SELECT TOP 1 1 AS x FROM ${table} WHERE WorkspaceId = @wid`)
+    return res.recordset.length > 0
+  }
+
+  // v10: order = Instance:Turno:Folio ; orderitem = Instance:Turno:Folio:Mov ; payment = Instance:Folio:PAY
+  const parts = entityId.split(':')
+  if (entityType === 'order' && parts.length === 3) {
+    const res = await pool
+      .request()
+      .input('t', sql.BigInt, parts[1])
+      .input('f', sql.BigInt, parts[2])
+      .query('SELECT TOP 1 1 AS x FROM cheques WHERE idturno = @t AND folio = @f')
+    return res.recordset.length > 0
+  }
+  if (entityType === 'orderitem' && parts.length === 4) {
+    const res = await pool
+      .request()
+      .input('f', sql.BigInt, parts[2])
+      .input('m', sql.Int, parts[3])
+      .query('SELECT TOP 1 1 AS x FROM cheqdet WHERE folio = @f AND movimiento = @m')
+    return res.recordset.length > 0
+  }
+  if (entityType === 'payment' && parts.length >= 2) {
+    const res = await pool
+      .request()
+      .input('f', sql.BigInt, parts[parts.length - 2])
+      .query('SELECT TOP 1 1 AS x FROM chequespagos WHERE folio = @f')
+    return res.recordset.length > 0
+  }
+  return false
 }
 
 /**
@@ -165,10 +232,7 @@ async function pollForChanges() {
   isPollInProgress = true
   try {
     const pool = getDbPool()
-    const result = await pool
-      .request()
-      .input('MaxResults', sql.Int, 100)
-      .execute('sp_GetPendingChanges')
+    const result = await pool.request().input('MaxResults', sql.Int, 100).execute('sp_GetPendingChanges')
 
     const changes = result.recordset as ChangeNotification[]
     await maybePurgeTracking(pool)
@@ -176,29 +240,10 @@ async function pollForChanges() {
 
     log.info(`[Producer] 🎯 ${changes.length} nuevos cambios detectados.`)
     const { venueId, posType } = loadConfig()
-    // ✅ PASO 1: Detectar los IDs de los turnos cerrados en este lote específico.
-    const closedShiftIdsInBatch = new Set<string>()
-    for (const change of changes) {
-      if (change.EntityType === 'shift' && change.Operation.includes('UPDATE')) {
-        // ✅ Validar que change.EntityId sea un número válido
-        const numericEntityId = parseInt(change.EntityId)
-        if (isNaN(numericEntityId) || !isFinite(numericEntityId)) {
-          log.warn(`[Producer-Context] EntityId inválido para shift: ${change.EntityId}`)
-          continue
-        }
-
-        const shiftRes = await pool
-          .request()
-          .input('idturno', sql.BigInt, numericEntityId)
-          .query('SELECT cierre FROM turnos WHERE idturno = @idturno')
-        if (shiftRes.recordset[0] && shiftRes.recordset[0].cierre) {
-          // Si el turno tiene una fecha de cierre, lo consideramos cerrado en este lote.
-          log.info(`[Producer-Context] Detectado cierre de turno en este lote: ${change.EntityId}`)
-          closedShiftIdsInBatch.add(change.EntityId)
-        }
-      }
-    }
-    // ✅ PASO 2: Procesar cada cambio con el contexto que acabamos de obtener.
+    // 🔧 SHIFT-CLOSE SUPPRESSION moved to a robust, version-agnostic per-change check (wasArchived):
+    // a temp* DELETE is archival (not a real cancellation) iff the entity exists in its permanent
+    // table. The old closedShiftIdsInBatch heuristic was v10-only and broken — it matched
+    // Operation.includes('UPDATE') but the shift trigger emits 'CLOSED', so the set was always empty.
     // Solo marcaremos procesados los Id cuyo publish se confirme (los debounced
     // los marca su propio timer). Los fallidos quedan pendientes → se reintentan.
     const succeededIds: Array<number | string> = []
@@ -209,13 +254,25 @@ async function pollForChanges() {
         let result: { payload: object } | null = null
         // Map CREATE -> created, UPDATE -> updated, DELETE -> deleted, CLOSED -> closed, OPENED -> created
         const operationMap: { [key: string]: string } = {
-          'CREATE': 'created',
-          'UPDATE': 'updated',
-          'DELETE': 'deleted',
-          'CLOSED': 'closed',
-          'OPENED': 'created'
+          CREATE: 'created',
+          UPDATE: 'updated',
+          DELETE: 'deleted',
+          CLOSED: 'closed',
+          OPENED: 'created',
         }
         const eventType = operationMap[change.Operation] || 'updated'
+
+        // 🔧 SHIFT-CLOSE SUPPRESSION (H-4/H-13/H-17): a temp* DELETE whose entity was archived to its
+        // permanent table (cheques/cheqdet/chequespagos) is part of a shift close, NOT a real
+        // cancellation — suppress the spurious deleted/CANCELLED event. Applies uniformly to
+        // order/orderitem/payment, for v11 (WorkspaceId) and v10 (idturno:folio).
+        if (eventType === 'deleted' && (await wasArchived(pool, change.EntityType, change.EntityId))) {
+          log.info(
+            `[Producer-Context] 🗄️ ${change.EntityType} ${change.EntityId} fue archivado (cierre de turno) — suprimiendo borrado espurio.`,
+          )
+          succeededIds.push(change.Id)
+          continue
+        }
 
         switch (change.EntityType) {
           case 'order':
@@ -232,29 +289,7 @@ async function pollForChanges() {
                 clearTimeout(pendingDebounce.timer)
                 debouncedOrders.delete(change.EntityId)
               }
-              // ✅ LÓGICA DE DECISIÓN INTELIGENTE PARA EVITAR ELIMINACION DE ORDENES EN TURNOS CERRADOS
-              if (eventType === 'deleted' && detectedVersion !== null) {
-                if (!usesWorkspaceId) {
-                  // v10 format: INSTANCE:TURNO:FOLIO
-                  const orderIdParts = change.EntityId.split(':')
-                  if (orderIdParts.length === 3) {
-                    const shiftIdForOrder = orderIdParts[1]
-                    if (closedShiftIdsInBatch.has(shiftIdForOrder)) {
-                      log.info(
-                        `[Producer-Context] Ignorando eliminación de la orden ${change.EntityId} porque pertenece al turno cerrado ${shiftIdForOrder}.`,
-                      )
-                      // Suprimido a propósito: marcar procesado para no reintentarlo.
-                      succeededIds.push(change.Id)
-                      continue
-                    }
-                  }
-                } else {
-                  // v11 format: WorkspaceId - check if order belongs to closed shift
-                  log.info(`[Producer-Context] v11 detectado para orden ${change.EntityId}. Verificando turnos cerrados...`)
-                  // For v11, we'll need to query the database to check shift status
-                  // This is more complex and will be handled in the processOrderChange function
-                }
-              }
+              // (Shift-close delete suppression is handled uniformly before the switch via wasArchived.)
               result = await processOrderChange(change, venueId)
               if (result) {
                 const routingKey = `pos.${posType}.order.${eventType}`
@@ -291,6 +326,14 @@ async function pollForChanges() {
               await publishMessage(POS_EVENTS_EXCHANGE, routingKey, result.payload)
               log.info(`[Producer] ✅ Evento enviado: ${routingKey} para ${change.EntityId}`)
             }
+            break
+
+          case 'payment':
+            // 🔧 H-3: payment changes reach the backend via the accompanying order.updated event,
+            // which now ALWAYS carries the payments[] array (including partials, pagado=0). We ack
+            // here (previously this row fell through and was silently marked processed). A dedicated
+            // pos.*.payment.* event can be added later if/when the backend consumes one.
+            log.info(`[Producer] 💳 Cambio de pago ${change.EntityId} (${change.Operation}) → reflejado vía order.updated.`)
             break
         }
         // Llegamos aquí sin excepción: el publish (o el skip intencional) tuvo
@@ -506,9 +549,10 @@ async function processOrderChangeV10(change: ChangeNotification, venueId: string
       }
     }
     let paymentsData: any[] = []
-    if (posData.pagado) {
-      // Si la bandera `pagado` es true...
-      log.info(`[Order Processor] Orden ${folio} marcada como pagada. Buscando detalles del pago...`)
+    // 🔧 H-3 FIX: include recorded payments ALWAYS (not only when pagado=1). Partial payments leave
+    // pagado=0, so the old guard hid them from the backend until the order was fully paid. The query
+    // returns 0 rows for unpaid orders, so this stays empty when there are genuinely no payments.
+    {
       const paymentsRes = await pool
         .request()
         .input('folio', sql.Int, folio)
@@ -522,7 +566,7 @@ async function processOrderChangeV10(change: ChangeNotification, venueId: string
           reference: p.referencia?.trim() || null,
           posRawData: p,
         }))
-        log.info(`[Order Processor] Se encontraron ${paymentsData.length} pagos para la orden ${folio}.`)
+        log.info(`[Order Processor] ${paymentsData.length} pago(s) para la orden ${folio} (pagado=${posData.pagado ? 1 : 0}).`)
       }
     }
     log.info(`[Order Processor] Obteniendo catálogo de formas de pago...`)
@@ -618,8 +662,9 @@ async function processOrderChangeV11(
 
     // Get payments data (same as v10)
     let paymentsData: any[] = []
-    if (posData.pagado) {
-      log.info(`[Order Processor v11] Orden ${posData.folio} marcada como pagada. Buscando detalles del pago...`)
+    // 🔧 H-3 FIX: include recorded payments ALWAYS (not only when pagado=1) so PARTIAL payments
+    // reach the backend. Empty for orders with no payments.
+    {
       const paymentsRes = await pool
         .request()
         .input('folio', sql.Int, posData.folio)
@@ -633,7 +678,7 @@ async function processOrderChangeV11(
           reference: p.referencia?.trim() || null,
           posRawData: p,
         }))
-        log.info(`[Order Processor v11] Se encontraron ${paymentsData.length} pagos para la orden ${posData.folio}.`)
+        log.info(`[Order Processor v11] ${paymentsData.length} pago(s) para la orden ${posData.folio} (pagado=${posData.pagado ? 1 : 0}).`)
       }
     }
 
@@ -866,7 +911,10 @@ async function processShiftChangeV10(change: ChangeNotification, venueId: string
     }
 
     const pool = getDbPool()
-    const shiftRes = await pool.request().input('idturno', sql.BigInt, numericIdTurno).query('SELECT * FROM turnos WHERE idturno = @idturno')
+    const shiftRes = await pool
+      .request()
+      .input('idturno', sql.BigInt, numericIdTurno)
+      .query('SELECT * FROM turnos WHERE idturno = @idturno')
     if (!shiftRes.recordset[0]) {
       log.warn(`[Shift Processor v10] No se encontraron datos para el turno ${idturno}.`)
       return null

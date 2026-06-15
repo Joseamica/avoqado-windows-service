@@ -569,6 +569,7 @@ The service integrates with existing POS tables through trigger-based change tra
 - **`sp_ApplyPartialPayment`** - Handles partial payment processing and validation
   - Includes comprehensive debug logging to AvoqadoDebugLog
   - Implements SoftRestaurant-style quantity adjustment for partial payments
+  - Fixed C-1 (remaining computed from the running balance, not re-derived from the mutated total → no balance drift/under-collection) and made idempotent by `@Reference` (redelivered Payment.APPLY no longer double-applies)
 
 **Shift Management (v2.5.0):**
 

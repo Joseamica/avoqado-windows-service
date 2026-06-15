@@ -322,6 +322,69 @@ ELSE
     PRINT '✅ No old records to clean up'
 
 PRINT ''
+
+-- Partial Payment Health (C-1 / H-7 monitoring)
+PRINT '💵 PARTIAL PAYMENT HEALTH (sp_ApplyPartialPayment)'
+PRINT '--------------------------------------------------------------------'
+
+-- 1) Recent sp_ApplyPartialPayment errors logged to AvoqadoDebugLog (last 7 days)
+PRINT 'Recent payment errors in AvoqadoDebugLog (Message LIKE ''%ERROR%'', last 7 days):'
+
+SELECT TOP 50
+    Timestamp,
+    Folio,
+    PaymentAmount,
+    Reference,
+    LEFT(Message, 200) as Message
+FROM AvoqadoDebugLog
+WHERE Message LIKE '%ERROR%'
+  AND Timestamp >= DATEADD(DAY, -7, GETDATE())
+ORDER BY Timestamp DESC
+
+IF NOT EXISTS (
+    SELECT 1 FROM AvoqadoDebugLog
+    WHERE Message LIKE '%ERROR%' AND Timestamp >= DATEADD(DAY, -7, GETDATE())
+)
+    PRINT '✅ No sp_ApplyPartialPayment errors in the last 7 days'
+
+PRINT ''
+
+-- 2) Integrity review: active orders that carry partial payments.
+--    NOTE: the ORIGINAL total cannot be recovered from temp* tables (the SP
+--    rewrites tempcheques.total to the running balance), so this is a MANUAL
+--    review list, not a hard pass/fail. After the C-1 fix the running `total`
+--    should equal (original total - SUM(importe)); a mismatch here vs. the
+--    expected balance for the venue is a red flag worth investigating.
+PRINT 'Active orders with partial payments (pagado=0 AND payments exist) — manual review:'
+
+SELECT
+    t.folio,
+    t.mesa,
+    t.idturno,
+    t.total                              as RunningTotal,
+    COUNT(p.folio)                       as PaymentRows,
+    ISNULL(SUM(p.importe), 0)            as SumImporte,
+    ISNULL(SUM(p.propina), 0)            as SumPropina,
+    t.total + ISNULL(SUM(p.importe), 0)  as ImpliedOriginalTotal
+FROM tempcheques t
+INNER JOIN tempchequespagos p ON p.folio = t.folio
+WHERE t.pagado = 0
+GROUP BY t.folio, t.mesa, t.idturno, t.total
+ORDER BY t.folio
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM tempcheques t
+    INNER JOIN tempchequespagos p ON p.folio = t.folio
+    WHERE t.pagado = 0
+)
+    PRINT '✅ No active orders with partial payments'
+
+PRINT ''
+PRINT '💡 RunningTotal should equal (originalTotal - SumImporte). ImpliedOriginalTotal'
+PRINT '   (RunningTotal + SumImporte) is a sanity figure for manual cross-check.'
+PRINT ''
+
 PRINT '======================================================================'
 PRINT ' DIAGNOSTICS COMPLETE'
 PRINT '======================================================================'

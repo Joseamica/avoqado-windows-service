@@ -402,6 +402,20 @@ AS BEGIN
                @OriginalSubtotal = subtotal, @OriginalTax = totalimpuesto1
         FROM tempcheques WHERE folio = @Folio
 
+        -- 🛡️ IDEMPOTENCY (H-7): RabbitMQ is at-least-once. A redelivered Payment.APPLY with the same
+        -- reference must NOT insert a second payment nor re-scale items. Short-circuit if already applied.
+        IF @Reference IS NOT NULL AND LTRIM(RTRIM(@Reference)) <> ''
+           AND EXISTS (SELECT 1 FROM tempchequespagos WHERE folio = @Folio AND referencia = @Reference)
+        BEGIN
+            SET @Success = 1
+            SET @Message = 'Pago ya aplicado previamente (idempotente)'
+            SET @Remaining = @OrderTotal
+            IF @@TRANCOUNT > 0 ROLLBACK
+            INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Reference, Message)
+            VALUES (@Folio, @PaymentAmount, @Reference, 'IDEMPOTENT: reference already applied to this folio, skipped')
+            RETURN
+        END
+
         -- 🔧 CRITICAL FIX: If order has idturno=0, assign it to current open shift
         -- This ensures the order appears in shift reports (corte de caja X)
         IF @CurrentIdTurno = 0
@@ -428,7 +442,11 @@ AS BEGIN
         END
 
         SELECT @PaidSoFar = ISNULL(SUM(importe), 0) FROM tempchequespagos WHERE folio = @Folio
-        SET @Remaining = @OrderTotal - (@PaidSoFar + @PaymentAmount)
+        -- 🔧 C-1 FIX: tempcheques.total is the OUTSTANDING balance — each partial already reduced it.
+        -- Remaining = current balance - THIS payment. The previous formula also subtracted @PaidSoFar,
+        -- double-counting prior payments (e.g. 2x$7 on $75 → showed $54 remaining instead of $61),
+        -- causing balance drift and premature pagado=1 (under-collection). @PaidSoFar is kept for logging only.
+        SET @Remaining = @OrderTotal - @PaymentAmount
 
         -- 🔍 DEBUG: Log calculation details
         INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
@@ -447,8 +465,9 @@ AS BEGIN
         INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)
         VALUES (@Folio, @PaymentAmount, 'Payment record inserted into tempchequespagos')
 
-        -- Check if order is now fully paid
-        IF ABS(@Remaining) <= 0.01
+        -- Check if order is now fully paid. <= 0.01 (not ABS) also covers exact payment AND
+        -- overpayment/change, preventing a negative @Remaining from producing a negative scaling ratio.
+        IF @Remaining <= 0.01
         BEGIN
             -- 🔍 DEBUG: Full payment path
             INSERT INTO AvoqadoDebugLog (Folio, PaymentAmount, Message)

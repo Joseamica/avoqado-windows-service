@@ -41,6 +41,7 @@
 - Target system is Microsoft SQL Server 2014 Express 32-bit; keep all queries/stored procedures compatible with this version.
 - Core tables: `tempcheques` (active orders), `tempcheqdet` (line items), `tempchequespagos` (payments), `turnos` (shifts), archived counterparts (`cheques`, `cheqdet`, `chequespagos`).
 - Stored procedures: `sp_GetPendingChanges`, `sp_MarkChangesProcessed`, and POS operations invoked by adapters must remain idempotent and performant.
+- `sp_ApplyPartialPayment` handles partial payment processing and validation. Fixed C-1 (remaining computed from the running balance, not re-derived from the mutated total → no balance drift/under-collection) and made idempotent by `@Reference` (redelivered Payment.APPLY no longer double-applies).
 - Entity IDs: v10 uses `{InstanceId}:{IdTurno}:{Folio}`; v11 uses `WorkspaceId` (plus `:Movimiento` for items). Always treat `turnos.idturno` as the business key, not `idturnointerno`.
 - Shift closure detection relies on `turnos.cierre` updates (see `CLAUDE.md` and `scripts/sql/shift-close-flow` notes). Deletions during archival should not be treated as cancellations.
 
