@@ -31,6 +31,13 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 
 > **Advertencia transversal:** el repo **no contiene profiler traces reales** (`info-softrest11/sql-traces` está ausente). Todo lo marcado `needs-live`/`domain-inferred` — en especial el cierre nativo de turno, el alta nativa de cuenta, los movimientos de caja y la facturación CFDI — **debe confirmarse con captura en vivo** (Extended Events / `npm run monitor`) antes de tratarse como verdad de campo.
 
+> **Revisión pre-push (2026-06-15, commit `37b68df`):** una revisión adversarial previa al push encontró
+> un bug de columna en el helper `wasArchived` de la dirección OBSERVE: la rama v10 de items consultaba
+> `cheqdet.folio` en vez de `cheqdet.foliodet`, rompiendo la supresión de DELETE de items en cada cierre v10
+> (detalle en H-4). **Arreglado** en `37b68df`. La misma revisión dejó abierto un caveat: la supresión de DELETE
+> de **pago** en v11/v12 podría fallar si el cierre nativo no preserva `chequespagos.WorkspaceId` —
+> **diferido a validación en vivo** (la supresión de **órdenes** en v11 SÍ está validada). Ver H-4.
+
 ---
 
 ## 2. Leyenda de confianza
@@ -317,6 +324,26 @@ El bridge está **parcialmente blindado**. La columna vertebral de durabilidad (
 > vacío). Validado en vivo en `avo`: orden archivada (en `cheques`) → DELETE **suprimido**; orden no
 > archivada → DELETE **publicado**. *Pendiente opcional (no-correctitud, solo carga): optimizar el guard
 > a nivel trigger para no generar miles de filas de tracking en un cierre grande (Fase 4).*
+>
+> **✅ Fix adicional pre-push (2026-06-15, commit `37b68df`) — columna de `wasArchived` en v10 (orderitem):**
+> la rama v10 de `wasArchived` para items consultaba `cheqdet WHERE folio=@f AND movimiento=@m`, pero la
+> columna real es `foliodet` (no `folio`). En una venue v10 real esto lanzaba "Invalid column name 'folio'"
+> en **cada** DELETE de item durante el cierre, dejando la fila de tracking sin procesar → re-lectura cada
+> 2s (reintento infinito) y la supresión **nunca** ocurría. Corregido a `foliodet`; validado en vivo (la
+> consulta corre limpia). La rama v11/v12 (por WorkspaceId) y la supresión de **órdenes** no estaban
+> afectadas.
+>
+> **⚠️ Caveat conocido — supresión de DELETE de PAGO en v11/v12 puede fallar (necesita validación en vivo):**
+> en v11/v12 `wasArchived` empareja la fila archivada por el WorkspaceId **de la propia entidad**
+> (`SELECT 1 FROM cheques|cheqdet|chequespagos WHERE WorkspaceId=@wid`). La supresión de **órdenes** ya está
+> **validada en vivo en `avo`** (⇒ `cheques` SÍ preserva el WorkspaceId de la orden — **NO** está rota). El
+> punto incierto es solo el **pago**: `chequespagos.WorkspaceId` tiene `DEFAULT(newid())` mientras que
+> `cheques`/`cheqdet` no tienen default; si el archivado nativo del cierre **no** copia el WorkspaceId temporal
+> a `chequespagos`, la supresión del DELETE de pago fallaría → eventos espurios de "pago eliminado" para ventas
+> ya finalizadas en un cierre grande (>30s, donde el guard a nivel trigger de 30s/flag tampoco corta). La
+> defensa primaria sigue siendo el guard a nivel trigger (flag `AvoqadoShiftArchiving` + ventana 30s). **Acción:
+> confirmar con un cierre de turno v11 real (con un pago)** si `chequespagos.WorkspaceId` se preserva en
+> `chequespagos`; mismo grupo de pendientes que "la ruta v10 necesita validación en vivo".
 - **Área:** Pago / Cierre de turno · **Categoría:** shift-close
 - **Evidencia:** `producer.ts:261-266` (rama v11 = no-op que loguea), `:581-583` (`processOrderChangeV11` DELETE→`CANCELLED` incondicional); contraste `:246-260` (v10 funciona). Único guard v11 = trigger (`01-COMPLETE-INSTALL.sql:635-647`).
 - **Problema:** en v11/v12 un DELETE de `tempcheques` fuera de la ventana 30s/flag se publica como **orden CANCELADA**. Si el archivado es lento (>30s) y el POS no llamó `sp_BeginShiftArchiving`, las purgas se filtran como cancelaciones, corrompiendo ventas completadas.
