@@ -2,6 +2,7 @@ import sql from 'mssql'
 import { getDbPool } from '../core/db'
 import { log } from '../core/logger'
 import { getIvaRate, detectUsesWorkspaceId, getDefaultEmpresa } from '../core/posMeta'
+import { claimCommand } from '../core/commandDedup'
 import { createEmptyOrder } from '../services/Orders/createEmptyOrder'
 import {
   IPOSAdapter,
@@ -24,14 +25,14 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * RECETA #1: Crea una orden vacía en la tabla tempcheques.
    */
-  async createEmptyOrder(data: OrderCreateData): Promise<{ folio: number }> {
-    return createEmptyOrder(data)
+  async createEmptyOrder(data: OrderCreateData, commandKey?: string): Promise<{ folio: number }> {
+    return createEmptyOrder(data, commandKey)
   }
 
   /**
    * RECETA #2: Añade un producto a una orden existente.
    */
-  async addItemToOrder(folio: number, item: OrderAddItemData): Promise<void> {
+  async addItemToOrder(folio: number, item: OrderAddItemData, commandKey?: string): Promise<void> {
     log.info(`[Adapter SR11] Añadiendo producto '${item.productId}' al folio ${folio}...`)
     console.log(`[Adapter SR11] Añadiendo producto '${item.productId}' al folio ${folio}...`)
     const pool = getDbPool()
@@ -51,6 +52,9 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
 
       // --- PASO 2: TRANSACCIÓN PARA INSERTAR Y ACTUALIZAR ---
       await transaction.begin()
+
+      // 🔧 review: claim de idempotencia atómico con el efecto (duplicado -> PK -> ack+skip).
+      if (commandKey) await claimCommand(transaction, commandKey)
 
       const movResult = await new sql.Request(transaction)
         .input('folio', sql.BigInt, folio)
@@ -131,12 +135,15 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * RECETA #3: Cancela un producto de una orden existente.
    */
-  async cancelOrderItem(folio: number, movementId: number, reason: string, user: string): Promise<void> {
+  async cancelOrderItem(folio: number, movementId: number, reason: string, user: string, commandKey?: string): Promise<void> {
     log.info(`[Adapter SR11] Cancelando producto movimiento ${movementId} del folio ${folio}...`)
     const pool = getDbPool()
     const transaction = new sql.Transaction(pool)
     try {
       await transaction.begin()
+
+      // 🔧 review: claim de idempotencia atómico con el efecto (duplicado -> PK -> ack+skip).
+      if (commandKey) await claimCommand(transaction, commandKey)
 
       const itemDataResult = await new sql.Request(transaction)
         .input('folio', sql.BigInt, folio)
@@ -207,7 +214,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    * a una orden hija nueva. Antes estos helpers existían pero no había método público
    * ni comando que los usara (operación inalcanzable desde Avoqado).
    */
-  async splitOrder(parentFolio: number, splitRatio: number): Promise<{ parentFolio: number; childFolio: number }> {
+  async splitOrder(parentFolio: number, splitRatio: number, commandKey?: string): Promise<{ parentFolio: number; childFolio: number }> {
     if (!(splitRatio > 0 && splitRatio < 1)) {
       throw new Error(`splitRatio debe estar entre 0 y 1 (exclusivo). Recibido: ${splitRatio}`)
     }
@@ -216,6 +223,9 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     const transaction = new sql.Transaction(pool)
     try {
       await transaction.begin()
+
+      // 🔧 review: claim de idempotencia atómico con el efecto (duplicado -> PK -> ack+skip).
+      if (commandKey) await claimCommand(transaction, commandKey)
 
       const totalRes = await new sql.Request(transaction)
         .input('folio', sql.BigInt, parentFolio)
@@ -327,7 +337,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
   /**
    * RECETA #5: Abre un nuevo turno en el POS.
    */
-  async openShift(data: ShiftOpenData): Promise<{ shiftId: number; staffName: string }> {
+  async openShift(data: ShiftOpenData, commandKey?: string): Promise<{ shiftId: number; staffName: string }> {
     log.info(`[Adapter SR11] Abriendo nuevo turno para el cajero ${data.posStaffId}...`)
     const pool = getDbPool()
     // 🔧 5d: turnos lleva WorkspaceId en v11/v12 pero NO en v10 → el INSERT con NEWID()
@@ -338,6 +348,9 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
     const transaction = new sql.Transaction(pool)
     try {
       await transaction.begin()
+
+      // 🔧 review: claim de idempotencia atómico con el efecto (duplicado -> PK -> ack+skip).
+      if (commandKey) await claimCommand(transaction, commandKey)
 
       // 🔧 5d: el siguiente idturno se calcula contra MAX(turnos) Y parametros.ultimoturno
       // (el contador nativo) para no colisionar con un turno que el POS nativo acabe de emitir.
@@ -1044,7 +1057,7 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
    * Este tipo de pago crea una orden especial con un producto genérico y la cierra inmediatamente.
    * Es útil para registrar transacciones rápidas sin necesidad de crear una orden completa.
    */
-  async createFastPayment(data: FastPaymentData): Promise<FastPaymentResult> {
+  async createFastPayment(data: FastPaymentData, commandKey?: string): Promise<FastPaymentResult> {
     log.info(`[Adapter SR11] 💰 Creando pago rápido por $${data.amount}`)
 
     const pool = getDbPool()
@@ -1052,6 +1065,9 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
 
     try {
       await transaction.begin()
+
+      // 🔧 review: claim de idempotencia atómico con el efecto (duplicado -> PK -> ack+skip).
+      if (commandKey) await claimCommand(transaction, commandKey)
 
       // 1. Obtener información del turno actual
       const shiftResult = await new sql.Request(transaction).query(`

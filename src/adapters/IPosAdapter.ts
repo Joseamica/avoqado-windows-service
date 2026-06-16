@@ -89,15 +89,17 @@ export interface FastPaymentResult {
 
 export interface IPOSAdapter {
   // Turnos
-  openShift(data: ShiftOpenData): Promise<{ shiftId: number; staffName: string }>
+  // `commandKey` (opcional): clave de idempotencia que se reclama DENTRO de la transacción del
+  // efecto (ver core/commandDedup.ts). Si se omite, no hay dedup (comportamiento tolerante).
+  openShift(data: ShiftOpenData, commandKey?: string): Promise<{ shiftId: number; staffName: string }>
   closeShift(shiftId: string, data: ShiftCloseData): Promise<void>
 
   // Órdenes
-  createEmptyOrder(data: OrderCreateData): Promise<{ folio: number }>
-  addItemToOrder(folio: number, item: OrderAddItemData): Promise<void>
-  cancelOrderItem(folio: number, movementId: number, reason: string, user: string): Promise<void>
+  createEmptyOrder(data: OrderCreateData, commandKey?: string): Promise<{ folio: number }>
+  addItemToOrder(folio: number, item: OrderAddItemData, commandKey?: string): Promise<void>
+  cancelOrderItem(folio: number, movementId: number, reason: string, user: string, commandKey?: string): Promise<void>
   // Divide una orden: mueve `splitRatio` (0<r<1) de cada línea a una orden hija nueva.
-  splitOrder(parentFolio: number, splitRatio: number): Promise<{ parentFolio: number; childFolio: number }>
+  splitOrder(parentFolio: number, splitRatio: number, commandKey?: string): Promise<{ parentFolio: number; childFolio: number }>
 
   // Pagos
   applyPayment(folio: number, payment: PaymentData): Promise<void>
@@ -107,5 +109,5 @@ export interface IPOSAdapter {
   applyIntelligentPayment(orderExternalId: string, payment: IntelligentPaymentData): Promise<PaymentResult>
 
   // ✅ NUEVO: Pago rápido (fast payment) para registro de transacciones directas
-  createFastPayment(data: FastPaymentData): Promise<FastPaymentResult>
+  createFastPayment(data: FastPaymentData, commandKey?: string): Promise<FastPaymentResult>
 }

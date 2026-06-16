@@ -19,8 +19,7 @@ import {
 } from '../adapters/IPosAdapter'
 import { SoftRestaurant11Adapter } from '../adapters/SoftRestaurant11Adapter'
 import { loadConfig } from '../config'
-import { getDbPool } from '../core/db'
-import sql from 'mssql'
+import { CommandAlreadyProcessedError } from '../core/commandDedup'
 
 let adapter: IPOSAdapter
 let reconnectHandlerRegistered = false
@@ -54,28 +53,14 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
     const { entity, action, payload } = commandMessage
     log.info(`[Comandante] Despachando acción: ${entity}.${action}`)
 
-    // 🔧 5a-2: idempotencia de comandos. Key estable = messageId (AMQP) / commandId / idempotencyKey
-    // que envíe el backend. Sin id NO se puede de-duplicar con seguridad (dos comandos legítimos
-    // idénticos colisionarían), así que en ese caso seguimos SIN dedup (fail-open + aviso).
-    const commandKey: string | null =
-      msg.properties?.messageId || commandMessage?.commandId || payload?.commandId || payload?.idempotencyKey || null
-    if (commandKey) {
-      try {
-        const dup = await getDbPool()
-          .request()
-          .input('k', sql.VarChar(200), String(commandKey))
-          .query('SELECT 1 AS x FROM AvoqadoProcessedCommands WHERE CommandKey = @k')
-        if (dup.recordset.length > 0) {
-          log.warn(`[Comandante] Comando ${commandKey} (${entity}.${action}) ya aplicado — idempotente: ack y skip.`)
-          channel.ack(msg)
-          return
-        }
-      } catch (dedupErr: any) {
-        log.warn(
-          `[Comandante] Dedup no disponible (¿falta AvoqadoProcessedCommands?); procediendo sin idempotencia: ${dedupErr?.message ?? dedupErr}`,
-        )
-      }
-    } else {
+    // 🔧 idempotencia ATÓMICA: la clave estable (messageId / commandId / idempotencyKey) se reclama
+    // DENTRO de la transacción del efecto (core/commandDedup.claimCommand), NO aquí. Así el registro
+    // de idempotencia y el efecto commitean (o se revierten) juntos: un redelivery concurrente o un
+    // crash a mitad ya NO puede aplicar dos veces. Sin id no hay dedup (fail-open) — el backend
+    // debería enviar uno único por comando.
+    const commandKey: string | undefined =
+      msg.properties?.messageId || commandMessage?.commandId || payload?.commandId || payload?.idempotencyKey || undefined
+    if (!commandKey) {
       log.warn(
         `[Comandante] Comando ${entity}.${action} SIN id (messageId/commandId/idempotencyKey): sin protección de idempotencia. El backend debería enviar un id único por comando.`,
       )
@@ -88,7 +73,7 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
 
     switch (`${entity}.${action}`) {
       case 'Order.CREATE':
-        await adapter.createEmptyOrder(payload as OrderCreateData)
+        await adapter.createEmptyOrder(payload as OrderCreateData, commandKey)
         log.info(`[Comandante] Acción 'createEmptyOrder' completada.`)
         break
 
@@ -98,7 +83,7 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         if (!orderFolio) {
           throw new Error("El payload para 'OrderItem.CREATE' debe incluir 'orderFolio'.")
         }
-        await adapter.addItemToOrder(orderFolio, itemData as OrderAddItemData)
+        await adapter.addItemToOrder(orderFolio, itemData as OrderAddItemData, commandKey)
         log.info(`[Comandante] Acción 'addItemToOrder' completada para el folio ${orderFolio}.`)
         break
 
@@ -108,7 +93,7 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         if (!cancelFolio || movementId == null) {
           throw new Error("El payload para 'OrderItem.CANCEL' debe incluir 'orderFolio' y 'movementId'.")
         }
-        await adapter.cancelOrderItem(cancelFolio, movementId, reason ?? 'Cancelado vía Avoqado', user ?? 'AVOQADO')
+        await adapter.cancelOrderItem(cancelFolio, movementId, reason ?? 'Cancelado vía Avoqado', user ?? 'AVOQADO', commandKey)
         log.info(`[Comandante] Acción 'cancelOrderItem' completada (folio ${cancelFolio}, movimiento ${movementId}).`)
         break
       }
@@ -119,7 +104,7 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         if (!splitFolio || splitRatio == null) {
           throw new Error("El payload para 'Order.SPLIT' debe incluir 'orderFolio' y 'splitRatio' (0<r<1).")
         }
-        const splitResult = await adapter.splitOrder(splitFolio, splitRatio)
+        const splitResult = await adapter.splitOrder(splitFolio, splitRatio, commandKey)
         log.info(`[Comandante] Acción 'splitOrder' completada. Padre: ${splitResult.parentFolio}, Hija: ${splitResult.childFolio}.`)
         break
       }
@@ -153,7 +138,7 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         }
 
         log.info(`[Comandante] Abriendo turno para cajero ${shiftOpenData.posStaffId}`)
-        const openResult = await adapter.openShift(shiftOpenData)
+        const openResult = await adapter.openShift(shiftOpenData, commandKey)
 
         log.info(`[Comandante] ✅ Turno abierto exitosamente. ID: ${openResult.shiftId}, Cajero: ${openResult.staffName}`)
         break
@@ -179,7 +164,7 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         }
 
         log.info(`[Comandante] Creando pago rápido por $${fastPaymentData.amount} con método ${fastPaymentData.posPaymentMethodId}`)
-        const fastPaymentResult = await adapter.createFastPayment(fastPaymentData)
+        const fastPaymentResult = await adapter.createFastPayment(fastPaymentData, commandKey)
 
         if (fastPaymentResult.success) {
           log.info(
@@ -196,25 +181,18 @@ export const handleCommand = async (msg: ConsumeMessage | null) => {
         throw new Error(`No hay un manejador para el comando: ${entity}.${action}`)
     }
 
-    // 🔧 5a-2: registrar el comando aplicado para que un redelivery (at-least-once) no lo repita.
-    if (commandKey) {
-      try {
-        await getDbPool()
-          .request()
-          .input('k', sql.VarChar(200), String(commandKey))
-          .input('e', sql.VarChar(50), String(entity ?? '').slice(0, 50))
-          .input('a', sql.VarChar(50), String(action ?? '').slice(0, 50))
-          .query(
-            'IF NOT EXISTS (SELECT 1 FROM AvoqadoProcessedCommands WHERE CommandKey=@k) INSERT INTO AvoqadoProcessedCommands (CommandKey, Entity, Action) VALUES (@k, @e, @a)',
-          )
-      } catch (recErr: any) {
-        log.warn(`[Comandante] No se pudo registrar el command key ${commandKey} (idempotencia): ${recErr?.message ?? recErr}`)
-      }
-    }
-
+    // El claim de idempotencia ya se registró DENTRO de la transacción del efecto (claimCommand),
+    // así que no hay un segundo INSERT post-efecto: registro y efecto son atómicos.
     channel.ack(msg)
     log.info(`[Comandante] Comando ${routingKey} procesado con éxito.`)
   } catch (error: any) {
+    // 🔧 idempotencia: el comando ya estaba aplicado (PK de AvoqadoProcessedCommands) → ack+skip,
+    // NO DLQ (no es un fallo; es un duplicado que ya surtió efecto exactamente una vez).
+    if (error instanceof CommandAlreadyProcessedError) {
+      log.warn(`[Comandante] ${error.message} (${routingKey}) — ack y skip.`)
+      channel.ack(msg)
+      return
+    }
     log.error({
       message: `[Comandante] Error al procesar comando`,
       routingKey: routingKey,

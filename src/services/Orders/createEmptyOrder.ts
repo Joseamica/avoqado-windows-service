@@ -5,8 +5,9 @@ import { OrderCreateData } from '../../adapters/IPosAdapter'
 import { getDbPool } from '../../core/db'
 import { log } from '../../core/logger'
 import { detectUsesWorkspaceId, getDefaultEmpresa } from '../../core/posMeta'
+import { claimCommand } from '../../core/commandDedup'
 
-export async function createEmptyOrder(data: OrderCreateData): Promise<{ folio: number }> {
+export async function createEmptyOrder(data: OrderCreateData, commandKey?: string): Promise<{ folio: number }> {
   log.info(`[Adapter SR11] Iniciando transacción para crear orden en mesa ${data.tableNumber}...`)
 
   log.info(`[Adapter SR11] Datos de la orden: ${JSON.stringify(data)}`)
@@ -42,6 +43,10 @@ export async function createEmptyOrder(data: OrderCreateData): Promise<{ folio: 
     log.info(`[Adapter SR11] Mesa ${data.tableNumber} está libre. Procediendo...`)
 
     await transaction.begin()
+
+    // 🔧 review: claim de idempotencia DENTRO de la tx (atómico con el efecto). Duplicado -> PK
+    // violation -> CommandAlreadyProcessedError -> el Comandante hace ack+skip.
+    if (commandKey) await claimCommand(transaction, commandKey)
 
     const folioResult = await new sql.Request(transaction).query("SELECT ultimaorden FROM folios WHERE serie=''")
     const nextOrderNumber = folioResult.recordset[0].ultimaorden + 1
