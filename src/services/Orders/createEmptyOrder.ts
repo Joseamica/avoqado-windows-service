@@ -5,7 +5,7 @@ import { OrderCreateData } from '../../adapters/IPosAdapter'
 import { getDbPool } from '../../core/db'
 import { log } from '../../core/logger'
 import { detectUsesWorkspaceId, getDefaultEmpresa } from '../../core/posMeta'
-import { claimCommand } from '../../core/commandDedup'
+import { claimCommand, CommandAlreadyProcessedError } from '../../core/commandDedup'
 
 export async function createEmptyOrder(data: OrderCreateData, commandKey?: string): Promise<{ folio: number }> {
   log.info(`[Adapter SR11] Iniciando transacción para crear orden en mesa ${data.tableNumber}...`)
@@ -26,27 +26,27 @@ export async function createEmptyOrder(data: OrderCreateData, commandKey?: strin
   const idarea = data.posAreaId && data.posAreaId.length > 0 ? data.posAreaId : '01'
   const idempresa = await getDefaultEmpresa(pool)
 
+  let committed = false
   try {
-    log.info(`[Adapter SR11] Verificando si la mesa ${data.tableNumber} está ocupada...`)
-    const checkTableQuery = `
-      SELECT folio FROM tempcheques
-      WHERE pagado = 0 AND cancelado = 0 AND mesa = @mesa
-    `
+    await transaction.begin()
 
-    const tableCheckResult = await pool.request().input('mesa', sql.VarChar, data.tableNumber).query(checkTableQuery)
+    // 🔧 review: claim de idempotencia DENTRO de la tx (atómico con el efecto). Va PRIMERO para que
+    // un duplicado se detecte antes que el chequeo de ocupación (ack+skip, no "mesa ocupada").
+    if (commandKey) await claimCommand(transaction, commandKey)
+
+    // 🔧 H-11: chequeo de ocupación DENTRO de la tx con UPDLOCK+HOLDLOCK → check-then-insert atómico.
+    // Antes corría FUERA de la tx (pool.request), dejando una carrera TOCTOU: dos creaciones
+    // concurrentes en la misma mesa pasaban ambas el chequeo y abrían dos órdenes.
+    log.info(`[Adapter SR11] Verificando si la mesa ${data.tableNumber} está ocupada...`)
+    const tableCheckResult = await new sql.Request(transaction)
+      .input('mesa', sql.VarChar, data.tableNumber)
+      .query('SELECT folio FROM tempcheques WITH (UPDLOCK, HOLDLOCK) WHERE pagado = 0 AND cancelado = 0 AND mesa = @mesa')
 
     if (tableCheckResult.recordset.length > 0) {
-      // Si la consulta devuelve algo, la mesa está ocupada. Lanzamos un error.
       const existingFolio = tableCheckResult.recordset[0].folio
       throw new Error(`La mesa ${data.tableNumber} ya está ocupada por el folio ${existingFolio}.`)
     }
     log.info(`[Adapter SR11] Mesa ${data.tableNumber} está libre. Procediendo...`)
-
-    await transaction.begin()
-
-    // 🔧 review: claim de idempotencia DENTRO de la tx (atómico con el efecto). Duplicado -> PK
-    // violation -> CommandAlreadyProcessedError -> el Comandante hace ack+skip.
-    if (commandKey) await claimCommand(transaction, commandKey)
 
     const folioResult = await new sql.Request(transaction).query("SELECT ultimaorden FROM folios WHERE serie=''")
     const nextOrderNumber = folioResult.recordset[0].ultimaorden + 1
@@ -56,15 +56,19 @@ export async function createEmptyOrder(data: OrderCreateData, commandKey?: strin
     if (usesWorkspaceId) {
       // v11/v12: incluimos WorkspaceId y recuperamos el folio por ese GUID (cada
       // entidad tiene el suyo, así que es un lookup exacto).
+      // 🔧 M-17: totales en 0 dentro del MISMO INSERT (antes se hacía un UPDATE post-commit FUERA
+      // de la tx → fila medio-inicializada visible y posible rollback() tras commit).
       const insertQuery = `
         INSERT INTO tempcheques(
           mesa, nopersonas, idmesero, fecha, orden, pagado, cancelado, impreso,
           idarearestaurant, idempresa, tipodeservicio, idturno,
-          estacion, Usuarioapertura, desc_porc_original, WorkspaceId
+          estacion, Usuarioapertura, desc_porc_original,
+          totalarticulos, subtotal, total, totalimpuesto1, WorkspaceId
         ) VALUES (
           @mesa, @nopersonas, @idmesero, GETDATE(), @orden, 0, 0, 0,
           @idarea, @idempresa, 1, 0,
-          'AVOQADO_SYNC', 'AVOQADO', 0, @workspaceId
+          'AVOQADO_SYNC', 'AVOQADO', 0,
+          0, 0, 0, 0, @workspaceId
         )
       `
       await new sql.Request(transaction)
@@ -89,15 +93,18 @@ export async function createEmptyOrder(data: OrderCreateData, commandKey?: strin
       // v10: SIN columna WorkspaceId. folio es IDENTITY, así que lo recuperamos con
       // SCOPE_IDENTITY() en el mismo request. (Camino menos probado: validar en una
       // DB v10 real antes de producción.)
+      // 🔧 M-17: totales en 0 dentro del MISMO INSERT (ver nota en la rama v11/v12).
       const insertQuery = `
         INSERT INTO tempcheques(
           mesa, nopersonas, idmesero, fecha, orden, pagado, cancelado, impreso,
           idarearestaurant, idempresa, tipodeservicio, idturno,
-          estacion, Usuarioapertura, desc_porc_original
+          estacion, Usuarioapertura, desc_porc_original,
+          totalarticulos, subtotal, total, totalimpuesto1
         ) VALUES (
           @mesa, @nopersonas, @idmesero, GETDATE(), @orden, 0, 0, 0,
           @idarea, @idempresa, 1, 0,
-          'AVOQADO_SYNC', 'AVOQADO', 0
+          'AVOQADO_SYNC', 'AVOQADO', 0,
+          0, 0, 0, 0
         );
         SELECT CAST(SCOPE_IDENTITY() AS BIGINT) AS folio;
       `
@@ -121,17 +128,24 @@ export async function createEmptyOrder(data: OrderCreateData, commandKey?: strin
       .query("UPDATE folios SET ultimaorden = @nextOrderNumber WHERE serie=''")
 
     await transaction.commit()
+    committed = true
     log.info(`[Adapter SR11] COMMIT exitoso. Orden creada con folio: ${newFolio}`)
-
-    await pool
-      .request()
-      .input('folio', sql.BigInt, newFolio)
-      .query('UPDATE tempcheques SET totalarticulos=0, subtotal=0, total=0, totalimpuesto1=0 WHERE folio=@folio')
 
     return { folio: newFolio }
   } catch (err: any) {
-    log.error('[Adapter SR11] Error en transacción de creación de orden, haciendo ROLLBACK...', err.message)
-    await transaction.rollback()
+    // 🔧 M-17: solo revertir si NO se commiteó (antes el UPDATE de totales post-commit podía lanzar
+    // y disparar rollback() sobre una tx ya commiteada, enmascarando el error real). El duplicado
+    // idempotente (sentinela) no es un error real → no se loguea como tal.
+    if (!(err instanceof CommandAlreadyProcessedError)) {
+      log.error('[Adapter SR11] Error en transacción de creación de orden, haciendo ROLLBACK...', err.message)
+    }
+    if (!committed) {
+      try {
+        await transaction.rollback()
+      } catch {
+        /* la tx pudo abortarse sola (abortTransactionOnError) */
+      }
+    }
     throw err
   }
 }
