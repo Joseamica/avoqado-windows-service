@@ -342,9 +342,13 @@ export class SoftRestaurant11Adapter implements IPOSAdapter {
       // 🔧 5d: el siguiente idturno se calcula contra MAX(turnos) Y parametros.ultimoturno
       // (el contador nativo) para no colisionar con un turno que el POS nativo acabe de emitir.
       // Antes solo miraba MAX(turnos), lo que podía reusar un id ya entregado por el POS.
+      // 🔧 review: UPDLOCK+HOLDLOCK sobre parametros toma el lock del contador y lo MANTIENE hasta el
+      // commit, serializando el read-modify-write con otro opener (otra instancia o el POS nativo, que
+      // también escribe parametros.ultimoturno). idturno NO tiene constraint único (la PK es
+      // idturnointerno), así que sin esto dos opens concurrentes podían emitir el MISMO idturno.
       const idResult = await new sql.Request(transaction).query(
         `SELECT CAST(ISNULL((SELECT MAX(idturno) FROM turnos), 0) AS BIGINT) AS maxTurno,
-                CAST(ISNULL((SELECT MAX(ultimoturno) FROM parametros), 0) AS BIGINT) AS ultimoTurno`,
+                CAST(ISNULL((SELECT MAX(ultimoturno) FROM parametros WITH (UPDLOCK, HOLDLOCK)), 0) AS BIGINT) AS ultimoTurno`,
       )
       const maxTurno = Number(idResult.recordset[0].maxTurno)
       const ultimoTurno = Number(idResult.recordset[0].ultimoTurno)

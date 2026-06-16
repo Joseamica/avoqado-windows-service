@@ -242,22 +242,42 @@ const setupConsumer = async (): Promise<void> => {
   // un nack(requeue=false) — comando fallido, JSON inválido o desconocido — se DESCARTABA en silencio.
   // Cambiar los argumentos de una cola existente lanza PRECONDITION_FAILED (y mata el canal), por eso
   // migramos en un canal temporal: si la cola ya existe sin DLX, la borramos y se recrea con DLX.
-  // (El borrado es one-time en el upgrade; un comando en vuelo en ese instante lo reenvía el backend.)
   const cmdQueueArgs = {
     durable: true,
     arguments: { 'x-dead-letter-exchange': DEAD_LETTER_EXCHANGE, 'x-dead-letter-routing-key': COMMANDS_DLQ_ROUTING_KEY },
   }
   const tmp = await getChannelModel().createChannel()
   tmp.on('error', () => {}) // tragar el error de canal del posible PRECONDITION_FAILED
+  let needsMigration = false
   try {
     await tmp.assertQueue(queueName, cmdQueueArgs)
-    await tmp.close()
-  } catch (preconditionErr: any) {
-    log.warn(`[Comandante] Migrando la cola "${queueName}" para añadir DLX (se recrea). ${preconditionErr?.message ?? ''}`)
+  } catch (assertErr: any) {
+    // 🔧 review: borrar la cola SOLO ante PRECONDITION_FAILED (406) = la cola existe con argumentos
+    // distintos (sin DLX). Cualquier OTRO error (canal/conexión transitorio en plena reconexión,
+    // permisos, límites del broker) NO debe destruir la cola durable ni los comandos persistidos:
+    // re-lanzamos para que el siguiente intento de reconexión lo reintente.
+    if (assertErr?.code !== 406) {
+      await tmp.close().catch(() => {})
+      throw assertErr
+    }
+    needsMigration = true
+    log.warn(`[Comandante] Migrando la cola "${queueName}" para añadir DLX (se recrea). ${assertErr?.message ?? ''}`)
+  }
+  await tmp.close().catch(() => {})
+  if (needsMigration) {
     const tmp2 = await getChannelModel().createChannel()
     tmp2.on('error', () => {})
     try {
-      await tmp2.deleteQueue(queueName)
+      // deleteQueue destruye los mensajes encolados (al borrar NO se dead-letterean). Si había
+      // comandos esperando (p. ej. encolados mientras el servicio estuvo detenido en el deploy),
+      // se PIERDEN: lo dejamos VISIBLE en ERROR para que un operador pida al backend re-despacharlos.
+      const del = await tmp2.deleteQueue(queueName)
+      if (del && typeof del.messageCount === 'number' && del.messageCount > 0) {
+        log.error(
+          `[Comandante] ⚠️ Migración DLX: se borró la cola "${queueName}" con ${del.messageCount} comando(s) sin consumir — ` +
+            `esos comandos se PERDIERON. El backend debe re-despacharlos.`,
+        )
+      }
     } finally {
       await tmp2.close().catch(() => {})
     }

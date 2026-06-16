@@ -150,7 +150,10 @@ async function wasArchived(pool: sql.ConnectionPool, entityType: string, entityI
       .request()
       .input('f', sql.BigInt, parts[2])
       .input('m', sql.Int, parts[3])
-      .query('SELECT TOP 1 1 AS x FROM cheqdet WHERE folio = @f AND movimiento = @m')
+      // cheqdet/tempcheqdet usan `foliodet` (no `folio`) como clave de orden. Con `folio`
+      // SQL Server lanza "Invalid column name" en CADA item-DELETE de cierre en v10 → el row
+      // quedaba sin procesar y se reintentaba cada poll (loop infinito) y nunca se suprimía.
+      .query('SELECT TOP 1 1 AS x FROM cheqdet WHERE foliodet = @f AND movimiento = @m')
     return res.recordset.length > 0
   }
   if (entityType === 'payment' && parts.length >= 2) {
